@@ -328,6 +328,12 @@ tbody tr:last-child td { border-bottom: 0; }
   body:not([data-view=month]) main > * { display: none; }
 }
 
+/* ---- 觸控裝置：輸入框至少 16px，iPhone 點輸入框時就不會自動放大畫面 ---- */
+@media (pointer: coarse), screen and (max-width: 719px) {
+  input, select, textarea, .chip { font-size: 16px; }
+  input[type=date], input[type=month], input[type=time] { min-height: 40px; }
+}
+
 /* ---- 手機 ---- */
 @media screen and (max-width: 860px) {
   .two { grid-template-columns: 1fr; }
