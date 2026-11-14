@@ -1,7 +1,7 @@
 /* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具
@@ -31,6 +31,8 @@
   // ------------------------------------------------------------------ 溫度數字鍵盤（觸控裝置；手機內建數字鍵沒有負號）
   const TOUCH = matchMedia('(pointer: coarse)').matches;
   const IM = TOUCH ? 'none' : 'decimal';
+  // iPhone 不理會 inputmode="none" 仍會跳出系統數字鍵（沒有負號），所以觸控裝置把溫度欄設成唯讀，只用 App 鍵盤輸入
+  const RO = TOUCH ? ' readonly' : '';
   const KP = {
     el: null, inp: null, start: '', fresh: false,
     build() {
@@ -55,7 +57,10 @@
     },
     show(inp) {
       if (!this.el) this.build();
+      if (this.inp && this.inp !== inp) { this.commit(); this.inp.classList.remove('kp-on'); }
+      if (this.inp === inp) return;
       this.inp = inp; this.start = inp.value; this.fresh = true;
+      inp.classList.add('kp-on');
       $('#kplabel', this.el).textContent = this.label(inp) + '（°C）';
       $('[data-k=next]', this.el).textContent = inp.matches('[data-t]') ? '下一格' : '完成';
       this.el.hidden = false;
@@ -64,6 +69,7 @@
       setTimeout(() => inp.scrollIntoView({ block: 'center', behavior: 'smooth' }), 50);
     },
     hide() {
+      if (this.inp) { this.commit(); this.inp.classList.remove('kp-on'); }
       if (this.el) this.el.hidden = true;
       document.body.classList.remove('kp-open');
       this.inp = null;
@@ -75,12 +81,13 @@
     },
     key(k) {
       const inp = this.inp; if (!inp) return;
-      if (k === 'hide') { this.commit(); inp.blur(); return; }
+      if (k === 'hide') { this.hide(); return; }
       if (k === 'next') {
-        this.commit();
-        if (!inp.matches('[data-t]') || !document.contains(inp)) { inp.blur(); return; }
+        if (!inp.matches('[data-t]') || !document.contains(inp)) { this.hide(); return; }
         const all = $$('[data-t]'), nx = all[all.indexOf(inp) + 1];
-        if (nx && !$('.modal')) nx.focus(); else inp.blur();
+        this.commit();
+        // 超溫會跳出處置視窗，這時先收起鍵盤
+        setTimeout(() => { if ($('.modal')) this.hide(); else if (nx) this.show(nx); else this.hide(); }, 80);
         return;
       }
       const cur = inp.value;
@@ -95,12 +102,16 @@
     },
   };
   if (TOUCH) {
-    document.addEventListener('focusin', (e) => { if (e.target.matches && e.target.matches('[data-kp]')) KP.show(e.target); });
-    document.addEventListener('focusout', (e) => {
-      if (!e.target.matches || !e.target.matches('[data-kp]')) return;
-      if (KP.inp === e.target) KP.commit();
-      setTimeout(() => { const a = document.activeElement; if (!(a && a.matches && a.matches('[data-kp]'))) KP.hide(); }, 30);
+    // 點溫度欄 → 開 App 鍵盤；點鍵盤以外的地方 → 儲存並收起
+    document.addEventListener('click', (e) => {
+      const t = e.target.closest && e.target.closest('[data-kp]');
+      if (t) { e.preventDefault(); if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur(); KP.show(t); }
     });
+    document.addEventListener('pointerdown', (e) => {
+      if (!KP.inp || (e.target.closest && e.target.closest('#kp, [data-kp], [data-act=sign]'))) return;
+      KP.hide();
+    }, true);
+    window.addEventListener('hashchange', () => KP.hide());
   }
 
   function toast(msg, ms = 2600) {
@@ -365,7 +376,8 @@
         const inp = $('[data-t]', b.closest('.srow'));
         const v = inp.value.trim();
         inp.value = v.startsWith('-') ? v.slice(1) : '-' + v;
-        if (inp.value === '-') { inp.focus(); return; }
+        if (KP.inp === inp) { KP.start = inp.value; KP.fresh = false; }
+        if (inp.value === '-') { if (TOUCH) KP.show(inp); else inp.focus(); return; }
         commitTemp(inp, true);
       } else if (a === 'act') {
         const r = b.closest('.srow');
@@ -405,7 +417,7 @@
     const act = has && e.x ? `<button class="actbox${e.act.trim() ? '' : ' open'}" data-act="act">${e.act.trim() ? `處置：${esc(e.act)}${e.rt != null ? `<br>複測 ${deg(e.rt)}${isBad(f, e.rt) ? '（仍異常）' : ''}` : ''}` : '⚠ 尚未填寫異常處置，點這裡填寫'}</button>` : '';
     return `<div class="srow${has ? ' has' : ''}${has && e.x ? ' x' : ''}" data-sid="${s.id}">
       <div class="slot"><b>${esc(s.name)}</b><small>${esc(s.time || '')}</small></div>
-      <div class="tin"><button class="btn icon sign" data-act="sign" tabindex="-1" title="正負號">±</button><input data-t type="text" inputmode="${IM}" data-kp autocomplete="off" value="${has ? t1(e.t) : ''}" placeholder="${f.type === 'freeze' ? '-18' : f.type === 'hot' ? '65' : '4'}" aria-label="${esc(f.name)} ${esc(s.name)} 溫度"><span class="unit">°C</span></div>
+      <div class="tin"><button class="btn icon sign" data-act="sign" tabindex="-1" title="正負號">±</button><input data-t type="text" inputmode="${IM}" data-kp${RO} autocomplete="off" value="${has ? t1(e.t) : ''}" placeholder="${f.type === 'freeze' ? '-18' : f.type === 'hot' ? '65' : '4'}" aria-label="${esc(f.name)} ${esc(s.name)} 溫度"><span class="unit">°C</span></div>
       <div class="st">${st}</div>
       <div class="meta">${meta}</div>
       ${act}
@@ -492,7 +504,7 @@
       <p><b>${esc(f.name)}</b>・${md(date)} ${esc(s ? s.name : '')}：<b class="xv">${deg(e.t)}</b>，標準為 ${esc(rangeText(f))}。請記錄處理方式。</p>
       <div class="chips">${ACTIONS.map((a) => `<button type="button" class="chip" data-chip="${esc(a)}">${esc(a)}</button>`).join('')}</div>
       <label class="fl">處置說明<textarea id="xact" rows="3" placeholder="例如：調低溫控並移出部分食材，30 分鐘後複測">${esc(e.act)}</textarea></label>
-      <label class="fl">複測溫度（°C，可空白）<input id="xrt" type="text" inputmode="${IM}" data-kp value="${e.rt != null ? t1(e.rt) : ''}" placeholder="${f.type === 'freeze' ? '-18' : '5'}" autocomplete="off"></label>
+      <label class="fl">複測溫度（°C，可空白）<input id="xrt" type="text" inputmode="${IM}" data-kp${RO} value="${e.rt != null ? t1(e.rt) : ''}" placeholder="${f.type === 'freeze' ? '-18' : '5'}" autocomplete="off"></label>
       <div class="btns"><button class="btn primary" type="submit">儲存處置</button><button class="btn" type="button" data-k="later">稍後再填</button></div>
     </form>`;
     const close = () => { m.remove(); if (cur.view === 'day') refresh(); };
@@ -1077,8 +1089,8 @@
           <td class="f-name"><input data-f="name" value="${esc(f.name)}" placeholder="設備名稱" aria-label="設備名稱"></td>
           <td class="f-area"><label><span>區域</span><input data-f="area" list="arealist" value="${esc(f.area)}" placeholder="例如 車前" aria-label="區域"></label></td>
           <td class="f-type"><select data-f="type" aria-label="類型">${Object.entries(TYPES).map(([k, t]) => `<option value="${k}" ${f.type === k ? 'selected' : ''}>${t.n}</option>`).join('')}</select></td>
-          <td class="r f-lo"><label><span>下限</span><input data-f="lo" type="text" inputmode="${IM}" data-kp value="${f.lo ?? ''}" placeholder="不限"></label></td>
-          <td class="r f-hi"><label><span>上限</span><input data-f="hi" type="text" inputmode="${IM}" data-kp value="${f.hi ?? ''}" placeholder="不限"></label></td>
+          <td class="r f-lo"><label><span>下限</span><input data-f="lo" type="text" inputmode="${IM}" data-kp${RO} value="${f.lo ?? ''}" placeholder="不限"></label></td>
+          <td class="r f-hi"><label><span>上限</span><input data-f="hi" type="text" inputmode="${IM}" data-kp${RO} value="${f.hi ?? ''}" placeholder="不限"></label></td>
           <td class="c f-off"><label><input type="checkbox" data-f="off" ${f.off ? 'checked' : ''}><span>停用</span></label></td>
           <td class="f-del"><button class="btn icon sm danger" data-act="delf" title="刪除">✕</button></td></tr>`).join('')}
         </tbody></table></div>` : '<p class="empty">尚無設備</p>'}
