@@ -1,0 +1,1167 @@
+/* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
+(() => {
+  'use strict';
+  const VERSION = '1.0.0';
+  const DESK = new URLSearchParams(location.search).has('desktop');
+
+  // ------------------------------------------------------------------ 工具
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const WD = '日一二三四五六';
+  const pad = (n) => String(n).padStart(2, '0');
+  const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const pd = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+  const addD = (s, n) => { const d = pd(s); d.setDate(d.getDate() + n); return ymd(d); };
+  const today = () => ymd(new Date());
+  const validYmd = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s) && ymd(pd(s)) === s;
+  const validYm = (s) => /^\d{4}-(0[1-9]|1[0-2])$/.test(s);
+  const spanDays = (a, b) => Math.round((pd(b) - pd(a)) / 864e5) + 1;
+  const num = (v) => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
+  const numOrNull = (v) => { if (v === '' || v == null) return null; const n = parseFloat(String(v).replace(/[−－﹣]/g, '-')); return isFinite(n) ? n : null; };
+  const md = (s) => `${+s.slice(5, 7)}/${+s.slice(8, 10)}`;
+  const hm = (d = new Date()) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const stamp = () => `${today()} ${hm()}`;
+  const deg = (t) => (t == null ? '' : (Math.round(t * 10) / 10).toFixed(1).replace(/\.0$/, '') + '°C');
+  const t1 = (t) => (t == null ? '' : (Math.round(t * 10) / 10).toFixed(1));
+  const daysInMonth = (ym) => new Date(+ym.slice(0, 4), +ym.slice(5, 7), 0).getDate();
+  const addM = (ym, n) => { const d = new Date(+ym.slice(0, 4), +ym.slice(5, 7) - 1 + n, 1); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; };
+
+  function toast(msg, ms = 2600) {
+    const t = $('#toast');
+    t.textContent = msg; t.hidden = false;
+    clearTimeout(toast.t); toast.t = setTimeout(() => { t.hidden = true; }, ms);
+  }
+  function setStatus(s, bad) { const e = $('#status'); e.textContent = s; e.classList.toggle('bad', !!bad); }
+
+  // ------------------------------------------------------------------ 儲存（瀏覽器：IndexedDB；桌面版：%APPDATA% 檔案）
+  const IDB = {
+    open() {
+      return this.p || (this.p = new Promise((res, rej) => {
+        const r = indexedDB.open('fridgetemp', 1);
+        r.onupgradeneeded = () => r.result.createObjectStore('kv');
+        r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+      }));
+    },
+    async get(k) {
+      const d = await this.open();
+      return new Promise((res, rej) => { const q = d.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+    },
+    async set(k, v) {
+      const d = await this.open();
+      return new Promise((res, rej) => { const t = d.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(); t.onerror = () => rej(t.error); });
+    },
+  };
+  function api() {
+    return new Promise((res) => {
+      const ok = () => window.pywebview && window.pywebview.api && window.pywebview.api.load;
+      if (ok()) return res(window.pywebview.api);
+      const iv = setInterval(() => { if (ok()) { clearInterval(iv); res(window.pywebview.api); } }, 50);
+    });
+  }
+  async function loadRaw() {
+    if (DESK) return (await api()).load();
+    return IDB.get('db');
+  }
+
+  let db;
+  let saveTimer;
+  function save() {
+    setStatus('儲存中…'); clearTimeout(saveTimer); saveTimer = setTimeout(flush, 400);
+    Cloud.schedule();
+  }
+  async function flush() {
+    clearTimeout(saveTimer); saveTimer = null;
+    const text = JSON.stringify(db);
+    try {
+      if (DESK) { const r = await (await api()).save(text); if (r !== true) throw new Error(r); } else await IDB.set('db', text);
+      setStatus('已儲存');
+    } catch (e) {
+      setStatus('儲存失敗', true);
+      alert('儲存失敗：' + (e && e.message || e));
+    }
+  }
+  document.addEventListener('visibilitychange', () => { if (document.hidden && saveTimer) flush(); });
+  window.addEventListener('pagehide', () => { if (saveTimer) flush(); });
+
+  // ------------------------------------------------------------------ 資料
+  // 依「食品良好衛生規範準則」：冷藏 7°C 以下、冷凍 -18°C 以下；熱藏 60°C 以上
+  const TYPES = {
+    chill: { n: '冷藏', lo: null, hi: 7 },
+    freeze: { n: '冷凍', lo: null, hi: -18 },
+    hot: { n: '熱藏', lo: 60, hi: null },
+    other: { n: '其他', lo: null, hi: null },
+  };
+  const ACTIONS = ['調整溫控設定', '關緊冰箱門／檢查門封條', '減少開門次數', '食材移至其他冰箱', '報廢受影響食材', '除霜／清潔散熱口', '通知廠商維修', '剛補貨或開門頻繁，稍後複測'];
+  const blank = () => ({ ver: 1, shop: '', shopAt: 0, fridges: [], slots: [], slotsAt: 0, staff: [], staffAt: 0, recs: {}, createdAt: Date.now(), seedAt: 0 });
+  function seed() {
+    const d = blank(), now = Date.now();
+    d.seedAt = now; d.slotsAt = now;
+    d.fridges = [
+      { name: '冷藏冰箱 1', type: 'chill' }, { name: '冷藏冰箱 2', type: 'chill' }, { name: '冷凍冰箱 1', type: 'freeze' },
+    ].map((x, i) => ({ id: uid() + i, name: x.name, type: x.type, lo: TYPES[x.type].lo, hi: TYPES[x.type].hi, off: false, deleted: false, ord: i + 1, at: now }));
+    d.slots = [{ id: 's1', name: '早', time: '09:00', deleted: false }, { id: 's2', name: '晚', time: '17:00', deleted: false }];
+    return d;
+  }
+  function normFridge(x, i) {
+    const type = TYPES[x.type] ? x.type : 'other';
+    return {
+      id: String(x.id), name: String(x.name ?? '').trim(), type,
+      lo: numOrNull(x.lo), hi: numOrNull(x.hi), off: !!x.off, deleted: !!x.deleted,
+      ord: num(x.ord) || i + 1, at: num(x.at) || 1,
+    };
+  }
+  function normSlots(list) {
+    return (Array.isArray(list) ? list : []).filter((s) => s && s.id).map((s) => ({
+      id: String(s.id), name: String(s.name || '').trim() || '未命名', time: /^\d{2}:\d{2}$/.test(s.time) ? s.time : '', deleted: !!s.deleted,
+    }));
+  }
+  function normRec(e) {
+    return {
+      t: numOrNull(e.t), ts: String(e.ts || ''), by: String(e.by || ''), act: String(e.act || ''), rt: numOrNull(e.rt),
+      x: e.x ? 1 : 0, at: num(e.at) || 1,
+    };
+  }
+  function norm(d) {
+    if (!d || typeof d !== 'object' || !Array.isArray(d.fridges)) throw new Error('不是冰箱溫度記錄表的資料');
+    d.ver = 1;
+    d.shop = String(d.shop || ''); d.shopAt = num(d.shopAt);
+    d.seedAt = num(d.seedAt);
+    d.fridges = d.fridges.filter((x) => x && x.id).map(normFridge);
+    sortFridges(d);
+    d.slots = normSlots(d.slots); d.slotsAt = num(d.slotsAt);
+    d.staff = (Array.isArray(d.staff) ? d.staff : []).map((s) => String(s).trim()).filter(Boolean); d.staffAt = num(d.staffAt);
+    d.recs = d.recs && typeof d.recs === 'object' ? d.recs : {};
+    for (const [k, v] of Object.entries(d.recs)) {
+      if (!validYmd(k) || !v || typeof v !== 'object') { delete d.recs[k]; continue; }
+      for (const [fid, ss] of Object.entries(v)) {
+        if (!ss || typeof ss !== 'object') { delete v[fid]; continue; }
+        for (const [sid, e] of Object.entries(ss)) { if (!e) delete ss[sid]; else ss[sid] = normRec(e); }
+      }
+    }
+    if (d.cloud && typeof d.cloud === 'object') {
+      const c = d.cloud;
+      d.cloud = { url: String(c.url || ''), pw: String(c.pw || ''), rev: num(c.rev), pushedAt: num(c.pushedAt), on: !!c.on, lastOk: num(c.lastOk), sheet: /^https:\/\/docs\.google\.com\//.test(c.sheet || '') ? String(c.sheet) : '' };
+    } else delete d.cloud;
+    d.me = String(d.me || '');
+    return d;
+  }
+  function sortFridges(d) { d.fridges.sort((a, b) => a.ord - b.ord); }
+  const fridgeById = (id) => db.fridges.find((x) => x.id === id);
+  const liveFridges = () => db.fridges.filter((x) => !x.deleted);
+  const activeFridges = () => db.fridges.filter((x) => !x.deleted && !x.off);
+  const liveSlots = () => db.slots.filter((s) => !s.deleted).sort((a, b) => (a.time || '99') < (b.time || '99') ? -1 : 1);
+  const slotById = (id) => db.slots.find((s) => s.id === id);
+  const now = () => Date.now();
+  const recOf = (d, fid, sid) => { const v = db.recs[d]; return v && v[fid] ? v[fid][sid] : undefined; };
+  const hasT = (e) => !!e && e.t != null;
+  function setRec(d, fid, sid, patch) {
+    const v = db.recs[d] || (db.recs[d] = {});
+    const f = v[fid] || (v[fid] = {});
+    const e = f[sid] || (f[sid] = { t: null, ts: '', by: '', act: '', rt: null, x: 0, at: 0 });
+    Object.assign(e, patch, { at: now() });
+    return e;
+  }
+  function isBad(f, t) {
+    if (t == null || !f) return false;
+    return (f.lo != null && t < f.lo) || (f.hi != null && t > f.hi);
+  }
+  function rangeText(f) {
+    if (f.lo != null && f.hi != null) return `${f.lo}～${f.hi}°C`;
+    if (f.hi != null) return `${f.hi}°C 以下`;
+    if (f.lo != null) return `${f.lo}°C 以上`;
+    return '未設定';
+  }
+  const typeName = (f) => (TYPES[f.type] || TYPES.other).n;
+  // 這個時段某天有哪些冰箱要記錄（停用的不算；當天已有紀錄的仍顯示）
+  function fridgesFor(d) {
+    const v = db.recs[d] || {};
+    return liveFridges().filter((f) => !f.off || Object.values(v[f.id] || {}).some(hasT));
+  }
+  function slotsFor(d) {
+    const v = db.recs[d] || {};
+    const used = new Set(); Object.values(v).forEach((ss) => Object.entries(ss).forEach(([sid, e]) => { if (hasT(e)) used.add(sid); }));
+    return db.slots.filter((s) => !s.deleted || used.has(s.id)).sort((a, b) => (a.time || '99') < (b.time || '99') ? -1 : 1);
+  }
+  const dueSlot = (s, d) => d < today() || (d === today() && s.time && s.time <= hm());
+  function dayStats(d) {
+    const fs = fridgesFor(d), ss = slotsFor(d);
+    let done = 0, due = 0, bad = 0, open = 0, total = 0;
+    const missing = [];
+    for (const s of ss) {
+      for (const f of fs) {
+        if (s.deleted && !hasT(recOf(d, f.id, s.id))) continue;
+        total++;
+        const e = recOf(d, f.id, s.id);
+        if (hasT(e)) { done++; if (e.x) { bad++; if (!e.act.trim()) open++; } }
+        else if (dueSlot(s, d)) { due++; missing.push([s, f]); }
+      }
+    }
+    return { done, due, bad, open, total, missing };
+  }
+
+  // ------------------------------------------------------------------ 路由
+  const cur = { view: '', date: today() };
+  function route() {
+    const h = location.hash.replace(/^#\/?/, '').split('/');
+    const v = ['day', 'month', 'chart', 'settings'].includes(h[0]) ? h[0] : 'day';
+    $$('#nav a').forEach((a) => a.classList.toggle('on', a.dataset.v === v));
+    $('#tt').hidden = true;
+    const el = $('#app');
+    el.onclick = el.oninput = el.onchange = el.onkeydown = el.onfocusin = null;
+    if (cur.view !== v) window.scrollTo(0, 0);
+    cur.view = v;
+    document.body.dataset.view = v;
+    if (v === 'month') viewMonth(el, validYm(h[1] || '') ? h[1] : today().slice(0, 7), h[2] || 'all');
+    else if (v === 'chart') viewChart(el);
+    else if (v === 'settings') viewSettings(el);
+    else viewDay(el, validYmd(h[1] || '') ? h[1] : today());
+    updateDot();
+  }
+  function renderShop() {
+    $('#shop').textContent = db.shop || '冰箱溫度記錄表';
+    document.title = (db.shop ? db.shop + ' · ' : '') + '冰箱溫度記錄表系統';
+  }
+  // 導覽列紅點：今天已到時間但還沒記錄，或有異常未處置
+  function updateDot() {
+    if (!db) return;
+    const s = dayStats(today());
+    const dot = $('#navdot');
+    dot.hidden = !(s.due || s.open);
+    dot.title = [s.due ? `今天還有 ${s.due} 筆未記錄` : '', s.open ? `${s.open} 筆異常待處置` : ''].filter(Boolean).join('、');
+  }
+  setInterval(() => { updateDot(); if (cur.view === 'day' && cur.date === today() && !$('#app').contains(document.activeElement)) renderBanner(); }, 60000);
+
+  // ------------------------------------------------------------------ 每日記錄
+  const kpi = (l, v, s = '', cls = '') => `<div class="kpi ${cls}"><div class="l">${l}</div><div class="v">${v}</div>${s ? `<div class="s">${s}</div>` : ''}</div>`;
+  function staffOptions() {
+    const names = [...new Set([...db.staff, ...(db.me ? [db.me] : [])])];
+    return names.map((n) => `<option value="${esc(n)}">`).join('');
+  }
+  function viewDay(el, date) {
+    cur.date = date;
+    const fs = fridgesFor(date), ss = slotsFor(date);
+    const wd = pd(date).getDay();
+    const isToday = date === today();
+    el.innerHTML = `
+      <div class="page-head">
+        <div class="datebar">
+          <button class="btn icon" data-act="prev" title="前一天">◀</button>
+          <input type="date" id="date" value="${date}" max="${today()}">
+          <span class="wd${wd % 6 === 0 ? ' we' : ''}">週${WD[wd]}${isToday ? '・今天' : ''}</span>
+          <button class="btn icon" data-act="next" title="後一天" ${isToday ? 'disabled' : ''}>▶</button>
+          ${isToday ? '' : '<button class="btn" data-act="today">回今天</button>'}
+        </div>
+        <label class="me${db.me ? '' : ' need'}">記錄人<input id="me" list="stafflist" value="${esc(db.me)}" placeholder="選擇或輸入姓名" autocomplete="off"></label>
+        <datalist id="stafflist">${staffOptions()}</datalist>
+      </div>
+      <div id="banner"></div>
+      <div class="kpis" id="daykpi"></div>
+      ${!fs.length ? '<p class="empty">還沒有冰箱設備，請到「⚙️ 設定」新增。</p>' : !ss.length ? '<p class="empty">還沒有記錄時段，請到「⚙️ 設定」新增（例如：早 09:00、晚 17:00）。</p>' : `
+      <div class="fridges">${fs.map((f) => `
+        <section class="fcard t-${f.type}" data-fid="${f.id}">
+          <div class="fhead"><span class="ficon">${f.type === 'freeze' ? '❄️' : f.type === 'hot' ? '🔥' : '🧊'}</span>
+            <div class="fname"><b>${esc(f.name || '未命名')}</b>${f.off ? '<small class="tag">停用</small>' : ''}<small>${typeName(f)}・標準 ${esc(rangeText(f))}</small></div></div>
+          ${ss.map((s) => slotRow(date, f, s)).join('')}
+        </section>`).join('')}
+      </div>`}
+      <p class="hint">輸入溫度會自動儲存並記下記錄人與時間。冷凍溫度記得按「±」或直接打負號（例如 -18）。超出標準會要求填寫異常處置。</p>`;
+    const go = (s) => { location.hash = '#/day/' + s; };
+    renderBanner(); renderDayKpi();
+    el.onclick = (e) => {
+      const b = e.target.closest('[data-act]'); if (!b) return;
+      const a = b.dataset.act;
+      if (a === 'prev') go(addD(date, -1));
+      else if (a === 'next') { if (!isToday) go(addD(date, 1)); }
+      else if (a === 'today') go(today());
+      else if (a === 'sign') {
+        const inp = $('[data-t]', b.closest('.srow'));
+        const v = inp.value.trim();
+        inp.value = v.startsWith('-') ? v.slice(1) : '-' + v;
+        if (inp.value === '-') { inp.focus(); return; }
+        commitTemp(inp, true);
+      } else if (a === 'act') {
+        const r = b.closest('.srow');
+        actionDialog(date, r.closest('.fcard').dataset.fid, r.dataset.sid);
+      } else if (a === 'gomiss') {
+        const inp = $(`.fcard[data-fid="${b.dataset.fid}"] .srow[data-sid="${b.dataset.sid}"] [data-t]`, el);
+        if (inp) { inp.scrollIntoView({ block: 'center' }); inp.focus(); }
+      }
+    };
+    el.oninput = (e) => {
+      const t = e.target;
+      if (t.matches('[data-t]')) commitTemp(t, false);
+      else if (t.id === 'me') { db.me = t.value.trim(); t.closest('.me').classList.toggle('need', !db.me); save(); }
+    };
+    el.onchange = (e) => {
+      const t = e.target;
+      if (t.id === 'date' && validYmd(t.value)) go(t.value > today() ? today() : t.value);
+      else if (t.matches('[data-t]')) commitTemp(t, true);
+    };
+    el.onfocusin = (e) => { if (e.target.matches('[data-t]')) setTimeout(() => e.target.select(), 0); };
+    el.onkeydown = (e) => {
+      if (!e.target.matches('[data-t]')) return;
+      if (e.key === 'Enter' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const all = $$('[data-t]', el);
+        const i = all.indexOf(e.target) + (e.key === 'ArrowUp' ? -1 : 1);
+        if (all[i]) all[i].focus(); else e.target.blur();
+      }
+    };
+  }
+  function slotRow(date, f, s) {
+    const e = recOf(date, f.id, s.id);
+    const has = hasT(e);
+    const st = !has ? (dueSlot(s, date) ? '<span class="pill miss">未記錄</span>' : '<span class="pill">—</span>')
+      : e.x ? `<span class="pill bad">異常</span>` : '<span class="pill ok">正常</span>';
+    const meta = has ? `${esc(e.by || '未填記錄人')}・${esc(tsText(e.ts, date))}` : '';
+    const act = has && e.x ? `<button class="actbox${e.act.trim() ? '' : ' open'}" data-act="act">${e.act.trim() ? `處置：${esc(e.act)}${e.rt != null ? `<br>複測 ${deg(e.rt)}${isBad(f, e.rt) ? '（仍異常）' : ''}` : ''}` : '⚠ 尚未填寫異常處置，點這裡填寫'}</button>` : '';
+    return `<div class="srow${has ? ' has' : ''}${has && e.x ? ' x' : ''}" data-sid="${s.id}">
+      <div class="slot"><b>${esc(s.name)}</b><small>${esc(s.time || '')}</small></div>
+      <div class="tin"><button class="btn icon sign" data-act="sign" tabindex="-1" title="正負號">±</button><input data-t type="text" inputmode="decimal" autocomplete="off" value="${has ? t1(e.t) : ''}" placeholder="${f.type === 'freeze' ? '-18' : f.type === 'hot' ? '65' : '4'}" aria-label="${esc(f.name)} ${esc(s.name)} 溫度"><span class="unit">°C</span></div>
+      <div class="st">${st}</div>
+      <div class="meta">${meta}</div>
+      ${act}
+    </div>`;
+  }
+  function tsText(ts, date) {
+    if (!ts) return '';
+    return ts.slice(0, 10) === date ? ts.slice(11) : `補登 ${md(ts.slice(0, 10))} ${ts.slice(11)}`;
+  }
+  // 解析溫度：接受 -18、－18、−18、18.5
+  function parseTemp(s) {
+    s = String(s).trim().replace(/[−－﹣]/g, '-').replace(/[。．]/g, '.').replace(/°c?|度/gi, '');
+    if (s === '' || s === '-') return { empty: true };
+    if (!/^-?\d{1,3}(\.\d*)?$/.test(s)) return { bad: true };
+    const t = parseFloat(s);
+    if (t < -60 || t > 120) return { bad: true };
+    return { t: Math.round(t * 10) / 10 };
+  }
+  function commitTemp(inp, final) {
+    const row = inp.closest('.srow'), card = row.closest('.fcard');
+    const date = cur.date, fid = card.dataset.fid, sid = row.dataset.sid;
+    const f = fridgeById(fid);
+    const p = parseTemp(inp.value);
+    inp.classList.toggle('warn', !!p.bad);
+    if (p.bad) { if (final) toast('溫度格式不對，例如 4、-18、3.5'); return; }
+    const e = recOf(date, fid, sid);
+    if (p.empty) {
+      if (!final && inp.value.trim() === '-') return;
+      if (hasT(e)) { setRec(date, fid, sid, { t: null, x: 0 }); save(); }
+    } else {
+      if (!final && /[.-]$/.test(inp.value.trim())) return;
+      if (!hasT(e) || e.t !== p.t) {
+        const x = isBad(f, p.t) ? 1 : 0;
+        setRec(date, fid, sid, { t: p.t, ts: stamp(), by: db.me || (e && e.by) || '', x });
+        save();
+      }
+      if (final && !db.me) { const m = $('#me'); if (m) m.closest('.me').classList.add('need'); toast('請在上方選擇「記錄人」'); }
+    }
+    const ne = recOf(date, fid, sid);
+    const s = slotById(sid);
+    const tmp = document.createElement('div');
+    tmp.innerHTML = slotRow(date, f, s);
+    const nr = tmp.firstElementChild;
+    // 只換掉狀態與說明，保留輸入框（避免游標跳走）
+    row.className = nr.className;
+    $('.st', row).replaceWith($('.st', nr));
+    $('.meta', row).replaceWith($('.meta', nr));
+    const oa = $('.actbox', row), na = $('.actbox', nr);
+    if (oa) oa.remove(); if (na) row.append(na);
+    renderDayKpi(); renderBanner(); updateDot();
+    if (final && hasT(ne) && ne.x && !ne.act.trim()) setTimeout(() => actionDialog(date, fid, sid), 50);
+  }
+  function renderDayKpi() {
+    const box = $('#daykpi'); if (!box) return;
+    const s = dayStats(cur.date);
+    box.innerHTML = kpi('已記錄', `${s.done}<small> / ${s.total}</small>`, s.total ? `完成 ${Math.round(s.done / s.total * 100)}%` : '', 'main')
+      + kpi('未記錄', s.due, '已到時間', s.due ? 'warnk' : '')
+      + kpi('異常', s.bad, s.bad ? `待處置 ${s.open}` : '全部正常', s.bad ? 'badk' : '');
+  }
+  function renderBanner() {
+    const box = $('#banner'); if (!box) return;
+    const s = dayStats(cur.date);
+    const parts = [];
+    if (s.missing.length && cur.date === today()) {
+      const by = new Map();
+      s.missing.forEach(([sl, f]) => { if (!by.has(sl.id)) by.set(sl.id, [sl, []]); by.get(sl.id)[1].push(f); });
+      for (const [sl, list] of by.values()) {
+        parts.push(`<div class="banner warn">⏰ <b>${esc(sl.name)}（${esc(sl.time)}）</b>還有 ${list.length} 台未記錄：${list.map((f) => `<button class="lnk" data-act="gomiss" data-fid="${f.id}" data-sid="${sl.id}">${esc(f.name)}</button>`).join('、')}</div>`);
+      }
+    }
+    if (s.open) parts.push(`<div class="banner bad">⚠ 有 ${s.open} 筆超溫紀錄尚未填寫處置</div>`);
+    box.innerHTML = parts.join('');
+  }
+
+  // 異常處置對話框
+  function actionDialog(date, fid, sid) {
+    const f = fridgeById(fid), s = slotById(sid), e = recOf(date, fid, sid);
+    if (!f || !hasT(e)) return;
+    $$('.modal').forEach((m) => m.remove());
+    const m = document.createElement('div');
+    m.className = 'modal';
+    m.innerHTML = `<form class="dlg wide" role="dialog" aria-modal="true">
+      <h3 class="xh">⚠ 溫度異常</h3>
+      <p><b>${esc(f.name)}</b>・${md(date)} ${esc(s ? s.name : '')}：<b class="xv">${deg(e.t)}</b>，標準為 ${esc(rangeText(f))}。請記錄處理方式。</p>
+      <div class="chips">${ACTIONS.map((a) => `<button type="button" class="chip" data-chip="${esc(a)}">${esc(a)}</button>`).join('')}</div>
+      <label class="fl">處置說明<textarea id="xact" rows="3" placeholder="例如：調低溫控並移出部分食材，30 分鐘後複測">${esc(e.act)}</textarea></label>
+      <label class="fl">複測溫度（°C，可空白）<input id="xrt" type="text" inputmode="decimal" value="${e.rt != null ? t1(e.rt) : ''}" placeholder="${f.type === 'freeze' ? '-18' : '5'}" autocomplete="off"></label>
+      <div class="btns"><button class="btn primary" type="submit">儲存處置</button><button class="btn" type="button" data-k="later">稍後再填</button></div>
+    </form>`;
+    const close = () => { m.remove(); if (cur.view === 'day') refresh(); };
+    m.onclick = (ev) => {
+      const c = ev.target.closest('[data-chip]');
+      if (c) {
+        const ta = $('#xact', m), v = ta.value.trim();
+        if (!v.includes(c.dataset.chip)) ta.value = v ? v + '、' + c.dataset.chip : c.dataset.chip;
+        c.classList.add('on'); ta.focus(); return;
+      }
+      if (ev.target.closest('[data-k=later]') || ev.target === m) close();
+    };
+    $('form', m).onsubmit = (ev) => {
+      ev.preventDefault();
+      const act = $('#xact', m).value.trim();
+      const rtS = $('#xrt', m).value.trim();
+      let rt = null;
+      if (rtS) { const p = parseTemp(rtS); if (p.bad) { $('#xrt', m).classList.add('warn'); return toast('複測溫度格式不對'); } rt = p.t ?? null; }
+      if (!act) { $('#xact', m).classList.add('warn'); return toast('請填寫處置說明，或按「稍後再填」'); }
+      setRec(date, fid, sid, { act, rt });
+      save(); close(); toast('已儲存異常處置');
+    };
+    m.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') close(); });
+    document.body.append(m);
+    $('#xact', m).focus();
+  }
+
+  // ------------------------------------------------------------------ 月報表（列印 / PDF / Excel）
+  function monthData(ym, fid) {
+    const n = daysInMonth(ym), t = today();
+    const days = Array.from({ length: n }, (_, i) => `${ym}-${pad(i + 1)}`);
+    const v = (d) => db.recs[d] || {};
+    let fs = liveFridges().filter((f) => !f.off || days.some((d) => Object.values(v(d)[f.id] || {}).some(hasT)));
+    if (fid !== 'all') fs = fs.filter((f) => f.id === fid);
+    const used = new Set();
+    days.forEach((d) => Object.values(v(d)).forEach((ss) => Object.entries(ss).forEach(([sid, e]) => { if (hasT(e)) used.add(sid); })));
+    const ss = db.slots.filter((s) => !s.deleted || used.has(s.id)).sort((a, b) => (a.time || '99') < (b.time || '99') ? -1 : 1);
+    return {
+      ym, days, slots: ss,
+      sheets: fs.map((f) => {
+        let done = 0, due = 0, bad = 0, sum = 0, mn = Infinity, mx = -Infinity;
+        const rows = days.map((d) => {
+          const cells = ss.map((s) => {
+            const e = recOf(d, f.id, s.id);
+            if (hasT(e)) { done++; sum += e.t; mn = Math.min(mn, e.t); mx = Math.max(mx, e.t); if (e.x) bad++; }
+            if (d <= t && !s.deleted) due++;
+            return { s, e: hasT(e) ? e : null };
+          });
+          const acts = cells.filter((c) => c.e && c.e.x).map((c) => `${c.s.name}：${c.e.act.trim() || '（未填處置）'}${c.e.rt != null ? `，複測 ${deg(c.e.rt)}` : ''}`);
+          return { d, cells, acts };
+        });
+        return { f, rows, done, due, bad, avg: done ? sum / done : null, mn: done ? mn : null, mx: done ? mx : null };
+      }),
+    };
+  }
+  function sheetHtml(M, S) {
+    const f = S.f, [y, m] = M.ym.split('-');
+    const name = db.shop || '';
+    return `<article class="sheet">
+      <header class="sh-head">
+        <h2>${esc(name)}${name ? ' ' : ''}冰箱溫度記錄表</h2>
+        <div class="sh-info"><span>設備：<b>${esc(f.name)}</b>（${typeName(f)}）</span><span>標準溫度：<b>${esc(rangeText(f))}</b></span><span><b>${y}</b> 年 <b>${+m}</b> 月</span></div>
+      </header>
+      <table class="sh-tbl">
+        <thead>
+          <tr><th rowspan="2" class="c">日期</th><th rowspan="2" class="c">星期</th>${M.slots.map((s) => `<th colspan="2" class="c">${esc(s.name)}${s.time ? `<small> ${esc(s.time)}</small>` : ''}</th>`).join('')}<th rowspan="2">異常處置</th><th rowspan="2" class="c sign">主管<br>確認</th></tr>
+          <tr>${M.slots.map(() => '<th class="c">溫度</th><th class="c">記錄人</th>').join('')}</tr>
+        </thead>
+        <tbody>${S.rows.map((r) => {
+          const wd = pd(r.d).getDay();
+          return `<tr class="${wd % 6 === 0 ? 'we' : ''}"><td class="c">${+r.d.slice(8)}</td><td class="c">${WD[wd]}</td>${r.cells.map((c) => c.e
+            ? `<td class="c t${c.e.x ? ' x' : ''}">${t1(c.e.t)}</td><td class="c by">${esc(c.e.by)}${c.e.ts && c.e.ts.slice(0, 10) !== r.d ? '<small>補</small>' : ''}</td>`
+            : '<td class="c t"></td><td class="c by"></td>').join('')}<td class="acts">${r.acts.map(esc).join('<br>')}</td><td></td></tr>`;
+        }).join('')}</tbody>
+      </table>
+      <footer class="sh-foot">
+        <div class="sh-sum">本月記錄 ${S.done} 筆${S.due ? `（應記錄 ${S.due} 筆，完成 ${Math.round(Math.min(S.done, S.due) / S.due * 100)}%）` : ''}・異常 <b class="${S.bad ? 'xv' : ''}">${S.bad}</b> 次${S.done ? `・平均 ${deg(S.avg)}・最低 ${deg(S.mn)}・最高 ${deg(S.mx)}` : ''}</div>
+        <div class="sh-signs"><span>記錄人：</span><span>主管：</span><span>負責人：</span></div>
+        <div class="sh-note">紅字表示超出標準溫度。依食品良好衛生規範準則，冷藏應保持 7°C 以下、冷凍應保持 -18°C 以下。</div>
+      </footer>
+    </article>`;
+  }
+  function viewMonth(el, ym, fid) {
+    if (fid !== 'all' && !fridgeById(fid)) fid = 'all';
+    const M = monthData(ym, fid);
+    const fs = liveFridges();
+    const go = (y, f) => { location.hash = `#/month/${y}/${f}`; };
+    el.innerHTML = `
+      <div class="page-head no-print">
+        <div class="datebar">
+          <button class="btn icon" data-act="prev" title="上個月">◀</button>
+          <input type="month" id="ym" value="${ym}">
+          <button class="btn icon" data-act="next" title="下個月">▶</button>
+        </div>
+        <div class="sp"></div>
+        <button class="btn" data-act="xlsx" ${M.sheets.length ? '' : 'disabled'}>⬇ 匯出 Excel</button>
+        <button class="btn primary" data-act="print" ${M.sheets.length ? '' : 'disabled'}>🖨 列印 / 存 PDF</button>
+      </div>
+      <div class="filters no-print"><div class="seg">${[['all', '全部設備'], ...fs.map((f) => [f.id, f.name || '未命名'])].map(([k, t]) => `<button class="${fid === k ? 'on' : ''}" data-fid="${k}">${esc(t)}</button>`).join('')}</div></div>
+      <p class="hint no-print">每台設備一頁 A4。列印時選「另存為 PDF」即可存成 PDF 檔。</p>
+      ${M.sheets.length ? `<div class="sheets">${M.sheets.map((S) => sheetHtml(M, S)).join('')}</div>` : '<p class="empty">沒有設備可以顯示。</p>'}`;
+    el.onclick = (e) => {
+      const b = e.target.closest('[data-act],[data-fid]'); if (!b) return;
+      if (b.dataset.fid) return go(ym, b.dataset.fid);
+      const a = b.dataset.act;
+      if (a === 'prev') go(addM(ym, -1), fid);
+      else if (a === 'next') go(addM(ym, 1), fid);
+      else if (a === 'print') doPrint();
+      else if (a === 'xlsx') exportXlsx(M);
+    };
+    el.onchange = (e) => { if (e.target.id === 'ym' && validYm(e.target.value)) go(e.target.value, fid); };
+  }
+  function doPrint() { window.print(); }
+
+  // ------------------------------------------------------------------ 匯出 Excel
+  function xlsxSheets(M) {
+    const B = 1, T = 5, TX = 6, RX = 7, H = 8;
+    const shop = db.shop || '';
+    const out = M.sheets.map((S) => {
+      const f = S.f;
+      const head1 = [{ v: '日期', s: B }, { v: '星期', s: B }];
+      M.slots.forEach((s) => { head1.push({ v: `${s.name}溫度`, s: B }, { v: `${s.name}記錄人`, s: B }, { v: `${s.name}時間`, s: B }); });
+      head1.push({ v: '異常處置', s: B });
+      const rows = [
+        [{ v: `${shop}${shop ? ' ' : ''}冰箱溫度記錄表`, s: H }],
+        ['設備', f.name, '類型', typeName(f), '標準溫度', rangeText(f)],
+        ['月份', `${M.ym.slice(0, 4)} 年 ${+M.ym.slice(5)} 月`, '匯出時間', new Date().toLocaleString('zh-TW', { hour12: false })],
+        [],
+        head1,
+        ...S.rows.map((r) => {
+          const row = [r.d, '週' + WD[pd(r.d).getDay()]];
+          r.cells.forEach((c) => { row.push(c.e ? { v: c.e.t, s: c.e.x ? TX : T } : null, c.e ? c.e.by : null, c.e ? c.e.ts : null); });
+          row.push(r.acts.length ? { v: r.acts.join('；'), s: RX } : null);
+          return row;
+        }),
+        [],
+        [{ v: '統計', s: B }],
+        ['記錄筆數', S.done, '異常次數', S.bad],
+        ['平均', S.avg == null ? null : { v: Math.round(S.avg * 10) / 10, s: T }, '最低', S.mn == null ? null : { v: S.mn, s: T }, '最高', S.mx == null ? null : { v: S.mx, s: T }],
+      ];
+      return { name: f.name || '設備', rows, cols: [12, 6, ...M.slots.flatMap(() => [9, 10, 17]), 50], freeze: 5 };
+    });
+    const xs = [];
+    M.sheets.forEach((S) => S.rows.forEach((r) => r.cells.forEach((c) => { if (c.e && c.e.x) xs.push([r.d, c.s.name, S.f.name, { v: c.e.t, s: TX }, rangeText(S.f), c.e.by, c.e.ts, c.e.act || '（未填）', c.e.rt == null ? null : { v: c.e.rt, s: isBad(S.f, c.e.rt) ? TX : T }]); })));
+    out.push({ name: '異常處置紀錄', rows: [['日期', '時段', '設備', '溫度', '標準', '記錄人', '記錄時間', '處置', '複測溫度'].map((v) => ({ v, s: B })), ...xs], cols: [12, 8, 16, 8, 14, 10, 17, 50, 10], freeze: 1 });
+    return out;
+  }
+  const fname = (s) => s.replace(/[\\/:*?"<>|]/g, '_');
+  async function exportXlsx(M) {
+    const bytes = XLSXW.build(xlsxSheets(M));
+    const name = fname(`${db.shop ? db.shop + '_' : ''}冰箱溫度記錄表_${M.ym.replace('-', '')}.xlsx`);
+    await saveFile(bytes, name, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  }
+  function b64(bytes) {
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(s);
+  }
+  async function saveFile(data, name, mime) {
+    const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+    if (DESK) {
+      const p = await (await api()).export_file(b64(bytes), name);
+      if (p) toast('已儲存：' + p, 4000);
+      return;
+    }
+    const blob = new Blob([bytes], { type: mime });
+    const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (ios && navigator.canShare) {
+      const file = new File([blob], name, { type: mime });
+      if (navigator.canShare({ files: [file] })) {
+        try { await navigator.share({ files: [file], title: name }); return; } catch (e) { if (e.name === 'AbortError') return; }
+      }
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.append(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+    toast('已下載：' + name);
+  }
+
+  // ------------------------------------------------------------------ 溫度趨勢（每台設備一張折線圖）
+  const PRESETS = [['7', '近7天'], ['14', '近14天'], ['30', '近30天'], ['90', '近90天'], ['month', '本月'], ['lmonth', '上月'], ['custom', '自訂']];
+  const ch = { preset: '14', from: '', to: '', only: '' };
+  function chartRange(p) {
+    const t = today(), d = pd(t);
+    if (p === 'month') return [t.slice(0, 8) + '01', t];
+    if (p === 'lmonth') return [ymd(new Date(d.getFullYear(), d.getMonth() - 1, 1)), ymd(new Date(d.getFullYear(), d.getMonth(), 0))];
+    if (p === 'custom') return [ch.from || addD(t, -13), ch.to || t];
+    return [addD(t, -(+p - 1)), t];
+  }
+  function chartData(f, from, to) {
+    const pts = [];
+    const ss = db.slots.slice().sort((a, b) => (a.time || '99') < (b.time || '99') ? -1 : 1);
+    let due = 0;
+    for (let d = from, n = 0; d <= to && n < 800; d = addD(d, 1), n++) {
+      const v = (db.recs[d] || {})[f.id] || {};
+      for (const s of ss) {
+        const e = v[s.id];
+        if (!s.deleted && d <= today() && !f.off) due++;
+        if (!hasT(e)) continue;
+        const tm = s.time || '12:00';
+        pts.push({ d, s, e, x: n + (+tm.slice(0, 2) * 60 + +tm.slice(3, 5)) / 1440 });
+      }
+    }
+    const ts = pts.map((p) => p.e.t);
+    return {
+      pts, due, n: spanDays(from, to),
+      avg: ts.length ? ts.reduce((a, b) => a + b, 0) / ts.length : null,
+      mn: ts.length ? Math.min(...ts) : null, mx: ts.length ? Math.max(...ts) : null,
+      bad: pts.filter((p) => p.e.x).length,
+    };
+  }
+  function viewChart(el) {
+    if (!ch.from) { const [f, t] = chartRange(ch.preset); ch.from = f; ch.to = t; }
+    const [from, to] = chartRange(ch.preset);
+    const fs = liveFridges().filter((f) => !ch.only || f.id === ch.only);
+    el.innerHTML = `
+      <div class="page-head"><h2>溫度趨勢</h2></div>
+      <div class="filters">
+        <div class="seg">${PRESETS.map(([k, t]) => `<button class="${ch.preset === k ? 'on' : ''}" data-preset="${k}">${t}</button>`).join('')}</div>
+        <div class="range"><input type="date" id="from" value="${from}" max="${today()}"> ～ <input type="date" id="to" value="${to}" max="${today()}"><span class="muted">共 ${spanDays(from, to)} 天</span></div>
+        <select id="only"><option value="">全部設備</option>${liveFridges().map((f) => `<option value="${f.id}" ${ch.only === f.id ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
+      </div>
+      ${fs.length ? `<div class="charts${fs.length === 1 ? ' one' : ''}">${fs.map((f) => {
+        const C = chartData(f, from, to);
+        return `<section class="card ccard" data-fid="${f.id}">
+          <div class="card-head"><h3>${esc(f.name)}</h3><small class="muted">${typeName(f)}・標準 ${esc(rangeText(f))}</small></div>
+          <div class="cstats">
+            <span>平均 <b>${C.avg == null ? '—' : deg(C.avg)}</b></span><span>最低 <b>${C.mn == null ? '—' : deg(C.mn)}</b></span><span>最高 <b>${C.mx == null ? '—' : deg(C.mx)}</b></span>
+            <span>異常 <b class="${C.bad ? 'xv' : ''}">${C.bad}</b> 次</span><span>完成率 <b>${C.due ? Math.round(Math.min(C.pts.length, C.due) / C.due * 100) + '%' : '—'}</b></span>
+          </div>
+          <div class="chart" data-chart="${f.id}">${C.pts.length ? '' : '<p class="empty">這段期間沒有紀錄</p>'}</div>
+        </section>`;
+      }).join('')}</div>` : '<p class="empty">沒有設備。</p>'}`;
+    drawCharts(from, to);
+    el.onclick = (e) => {
+      const p = e.target.closest('[data-preset]');
+      if (p) {
+        ch.preset = p.dataset.preset;
+        if (ch.preset !== 'custom') { const [f, t] = chartRange(ch.preset); ch.from = f; ch.to = t; }
+        viewChart(el);
+      }
+    };
+    el.onchange = (e) => {
+      const t = e.target;
+      if (t.id === 'only') { ch.only = t.value; viewChart(el); }
+      else if ((t.id === 'from' || t.id === 'to') && validYmd(t.value)) {
+        if (ch.preset !== 'custom') { const [f, tt] = chartRange(ch.preset); ch.from = f; ch.to = tt; }
+        ch.preset = 'custom'; ch[t.id] = t.value;
+        if (ch.from > ch.to) { if (t.id === 'from') ch.to = ch.from; else ch.from = ch.to; }
+        viewChart(el);
+      }
+    };
+  }
+  let lastCharts = null;
+  function drawCharts(from, to) {
+    lastCharts = [from, to];
+    $$('[data-chart]').forEach((box) => {
+      const f = fridgeById(box.dataset.chart);
+      const C = chartData(f, from, to);
+      if (C.pts.length) drawLine(box, f, C, from);
+    });
+  }
+  const NS = 'http://www.w3.org/2000/svg';
+  function drawLine(box, f, C, from) {
+    const W = Math.max(280, box.clientWidth), H = W < 520 ? 190 : 230;
+    const m = { l: 40, r: 10, t: 12, b: 26 };
+    const pw = W - m.l - m.r, ph = H - m.t - m.b;
+    const vals = C.pts.map((p) => p.e.t);
+    if (f.lo != null) vals.push(f.lo);
+    if (f.hi != null) vals.push(f.hi);
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    const span = Math.max(4, hi - lo);
+    lo = Math.floor(lo - span * 0.15); hi = Math.ceil(hi + span * 0.15);
+    const step = [1, 2, 5, 10, 20, 25, 50].find((s) => (hi - lo) / s <= 6) || 50;
+    lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+    const X = (x) => m.l + (x / C.n) * pw, Y = (v) => m.t + ph - ((v - lo) / (hi - lo)) * ph;
+    let s = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" xmlns="${NS}" role="img" aria-label="${esc(f.name)} 溫度趨勢">`;
+    // 合格範圍底色
+    const bandTop = f.hi != null ? Y(Math.min(hi, f.hi)) : m.t, bandBot = f.lo != null ? Y(Math.max(lo, f.lo)) : m.t + ph;
+    if (f.lo != null || f.hi != null) s += `<rect class="band" x="${m.l}" y="${bandTop}" width="${pw}" height="${Math.max(0, bandBot - bandTop)}"/>`;
+    for (let v = lo; v <= hi + 1e-9; v += step) s += `<line x1="${m.l}" x2="${W - m.r}" y1="${Y(v)}" y2="${Y(v)}" class="${v === 0 ? 'zero' : 'grid'}"/><text x="${m.l - 6}" y="${Y(v) + 4}" class="yl">${v}°</text>`;
+    if (f.hi != null) s += `<line x1="${m.l}" x2="${W - m.r}" y1="${Y(f.hi)}" y2="${Y(f.hi)}" class="limit"/>`;
+    if (f.lo != null) s += `<line x1="${m.l}" x2="${W - m.r}" y1="${Y(f.lo)}" y2="${Y(f.lo)}" class="limit"/>`;
+    const every = Math.max(1, Math.ceil(C.n / Math.max(1, Math.floor(pw / 46))));
+    for (let i = 0; i < C.n; i += every) s += `<text x="${X(i + 0.5)}" y="${H - 8}" class="xl">${md(addD(from, i))}</text>`;
+    // 折線（相隔超過 2 天沒有紀錄就斷開）
+    let d = '', prev = null;
+    for (const p of C.pts) { d += `${prev && p.x - prev.x <= 2 ? 'L' : 'M'}${X(p.x).toFixed(1)},${Y(p.e.t).toFixed(1)}`; prev = p; }
+    s += `<path class="line" d="${d}"/>`;
+    const r = C.pts.length > 120 ? 2 : 3.2;
+    C.pts.forEach((p, i) => { s += `<circle class="pt${p.e.x ? ' x' : ''}" data-i="${i}" cx="${X(p.x).toFixed(1)}" cy="${Y(p.e.t).toFixed(1)}" r="${p.e.x ? r + 1.6 : r}"/>`; });
+    s += `<rect class="hit" x="${m.l}" y="${m.t}" width="${pw}" height="${ph}"/></svg>`;
+    box.innerHTML = s;
+    const svg = $('svg', box);
+    const move = (ev) => {
+      const rc = svg.getBoundingClientRect();
+      const mx = (ev.clientX - rc.left) * (W / rc.width);
+      let best = null, bd = Infinity;
+      C.pts.forEach((p, i) => { const dd = Math.abs(X(p.x) - mx); if (dd < bd) { bd = dd; best = i; } });
+      $$('.pt.hl', box).forEach((x) => x.classList.remove('hl'));
+      if (best == null || bd > 30) return hideTip();
+      const p = C.pts[best];
+      $(`.pt[data-i="${best}"]`, box).classList.add('hl');
+      showTip(ev, `<b>${md(p.d)}（週${WD[pd(p.d).getDay()]}）${esc(p.s.name)}</b><br>溫度 <b>${deg(p.e.t)}</b>${p.e.x ? '（異常）' : ''}<br>記錄人 ${esc(p.e.by || '—')}${p.e.x ? `<br>處置：${esc(p.e.act || '未填')}` : ''}`);
+    };
+    svg.onmousemove = move;
+    svg.onmouseleave = () => { hideTip(); $$('.pt.hl', box).forEach((x) => x.classList.remove('hl')); };
+    svg.onclick = move;
+  }
+  let rsz;
+  window.addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(() => { if (cur.view === 'chart' && lastCharts) drawCharts(...lastCharts); }, 150); });
+  function showTip(e, html) {
+    const t = $('#tt'); t.innerHTML = html; t.hidden = false;
+    const r = t.getBoundingClientRect();
+    let x = e.clientX + 14, yy = e.clientY + 14;
+    if (x + r.width > innerWidth - 8) x = e.clientX - r.width - 14;
+    if (yy + r.height > innerHeight - 8) yy = e.clientY - r.height - 14;
+    t.style.left = Math.max(4, x) + 'px'; t.style.top = Math.max(4, yy) + 'px';
+  }
+  function hideTip() { $('#tt').hidden = true; }
+
+  // ------------------------------------------------------------------ Google 雲端同步
+  const Cloud = {
+    busy: false, again: false, timer: null, poll: null, state: '', err: '',
+    on() { return !!(db.cloud && db.cloud.on && db.cloud.url && db.cloud.pw); },
+    async req(body, c = db.cloud) {
+      const ctl = new AbortController();
+      const to = setTimeout(() => ctl.abort(), 45000);
+      try {
+        const r = await fetch(c.url, { method: 'POST', body: JSON.stringify({ ...body, pw: c.pw }), headers: { 'Content-Type': 'text/plain;charset=utf-8' }, signal: ctl.signal });
+        const t = await r.text();
+        let j;
+        try { j = JSON.parse(t); } catch (e) { throw new Error(r.ok ? '雲端回應格式不對（網址正確嗎？）' : '雲端錯誤 HTTP ' + r.status); }
+        if (!j.ok) { const e = new Error(j.err || '雲端錯誤'); e.auth = !!j.auth; throw e; }
+        return j;
+      } catch (e) {
+        if (e.name === 'AbortError') throw new Error('連線逾時');
+        if (e instanceof TypeError) throw new Error('無法連線（請檢查網路或網址）');
+        throw e;
+      } finally { clearTimeout(to); }
+    },
+    changes(since) {
+      const out = { fridges: [], recs: [], conf: {} };
+      for (const f of db.fridges) if (f.at > since) out.fridges.push(f);
+      for (const [d, v] of Object.entries(db.recs)) {
+        for (const [fid, ss] of Object.entries(v)) {
+          for (const [sid, e] of Object.entries(ss)) if (e.at > since) out.recs.push({ d, fid, sid, ...e });
+        }
+      }
+      if (db.shopAt > since) out.conf.shop = { v: db.shop, at: db.shopAt };
+      if (db.slotsAt > since) out.conf.slots = { v: db.slots, at: db.slotsAt };
+      if (db.staffAt > since) out.conf.staff = { v: db.staff, at: db.staffAt };
+      return out;
+    },
+    pending() {
+      const c = this.changes(db.cloud.pushedAt);
+      return c.fridges.length + c.recs.length + Object.keys(c.conf).length;
+    },
+    merge(r) {
+      let ch = false;
+      for (const x of r.fridges || []) {
+        if (!x || !x.id) continue;
+        const l = fridgeById(x.id);
+        if (!l) { db.fridges.push(normFridge(x, db.fridges.length)); ch = true; } else if (num(x.at) > l.at) { Object.assign(l, normFridge(x, 0)); ch = true; }
+      }
+      if (ch) sortFridges(db);
+      for (const x of r.recs || []) {
+        if (!x || !validYmd(x.d) || !x.fid || !x.sid) continue;
+        const l = recOf(x.d, x.fid, x.sid);
+        if (!l || num(x.at) > l.at) {
+          const v = db.recs[x.d] || (db.recs[x.d] = {});
+          (v[x.fid] || (v[x.fid] = {}))[x.sid] = normRec(x);
+          ch = true;
+        }
+      }
+      const c = r.conf || {};
+      if (c.shop && num(c.shop.at) > db.shopAt) { db.shop = String(c.shop.v || ''); db.shopAt = num(c.shop.at); renderShop(); ch = true; }
+      if (c.slots && num(c.slots.at) > db.slotsAt) { db.slots = normSlots(c.slots.v); db.slotsAt = num(c.slots.at); ch = true; }
+      if (c.staff && num(c.staff.at) > db.staffAt) { db.staff = (c.staff.v || []).map(String).filter(Boolean); db.staffAt = num(c.staff.at); ch = true; }
+      return ch;
+    },
+    schedule(ms = 1500) { if (!this.on()) return; clearTimeout(this.timer); this.timer = setTimeout(() => this.sync(), ms); },
+    async sync() {
+      if (!this.on()) return false;
+      if (this.busy) { this.again = true; return false; }
+      clearTimeout(this.timer);
+      this.busy = true; this.show('sync');
+      const c = db.cloud;
+      try {
+        const t0 = now() - 1;
+        const r = await this.req({ a: 'sync', since: c.rev, changes: this.changes(c.pushedAt) });
+        if (db.cloud !== c || !this.on()) return false;
+        const changed = this.merge(r);
+        c.rev = r.rev; c.pushedAt = t0; c.lastOk = now();
+        if (r.sheet) c.sheet = r.sheet;
+        await flush();
+        this.err = ''; this.show('ok');
+        if (changed) refresh();
+        return true;
+      } catch (e) {
+        this.err = e.message; this.show(e.auth ? 'auth' : 'err');
+        return false;
+      } finally {
+        this.busy = false;
+        if (this.again) { this.again = false; this.schedule(300); }
+      }
+    },
+    async tick() {
+      if (document.hidden || this.busy || !this.on()) return;
+      if (this.state !== 'ok' || this.pending()) return this.sync();
+      try {
+        const r = await this.req({ a: 'rev' });
+        if (r.rev !== db.cloud.rev) this.sync();
+      } catch (e) { this.err = e.message; this.show(e.auth ? 'auth' : 'err'); }
+    },
+    start() {
+      clearInterval(this.poll);
+      if (!this.on()) { this.show(''); return; }
+      this.poll = setInterval(() => this.tick(), 15000);
+      this.sync();
+    },
+    show(s) {
+      this.state = s;
+      const e = $('#cloudst');
+      const map = { sync: ['☁ 同步中…', ''], ok: ['☁ 已同步', 'ok'], err: ['☁ 離線', 'bad'], auth: ['☁ 密碼錯誤', 'bad'] };
+      const [t, cls] = map[s] || ['', ''];
+      e.textContent = t; e.className = 'cloudst ' + cls;
+      e.title = s === 'ok' ? '最後同步 ' + new Date(db.cloud.lastOk).toLocaleTimeString('zh-TW', { hour12: false }) : this.err;
+      e.hidden = !t;
+      const box = $('#cloudinfo'); if (box) box.innerHTML = cloudInfo();
+    },
+  };
+  let pendingRefresh = false;
+  function refresh() {
+    const a = document.activeElement;
+    if ((a && $('#app').contains(a) && a.matches('input, textarea, select')) || $('.modal')) { pendingRefresh = true; return; }
+    pendingRefresh = false;
+    const y = window.scrollY;
+    route();
+    window.scrollTo(0, y);
+  }
+  document.addEventListener('focusout', () => setTimeout(() => { if (pendingRefresh) refresh(); }, 80));
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { Cloud.tick(); updateDot(); } });
+  window.addEventListener('online', () => Cloud.tick());
+
+  function choose(msg, opts) {
+    return new Promise((res) => {
+      const m = document.createElement('div');
+      m.className = 'modal';
+      m.innerHTML = `<div class="dlg" role="dialog" aria-modal="true"><p>${esc(msg)}</p><div class="btns col">${opts.map(([k, t], i) => `<button class="btn${i ? '' : ' primary'}" data-k="${k}">${esc(t)}</button>`).join('')}</div></div>`;
+      m.onclick = (e) => { const b = e.target.closest('[data-k]'); if (b || e.target === m) { m.remove(); res(b ? b.dataset.k : null); } };
+      document.body.append(m);
+      $('.btn', m).focus();
+    });
+  }
+  const anyRecs = () => Object.values(db.recs).some((v) => Object.values(v).some((ss) => Object.values(ss).some(hasT)));
+  const isPristine = () => !anyRecs() && db.fridges.every((f) => f.at <= db.seedAt) && db.slotsAt <= db.seedAt && !db.staffAt && !db.shopAt;
+  async function connectCloud(url, pw) {
+    url = url.trim();
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url) && !/^http:\/\/127\.0\.0\.1:\d+\/?/.test(url)) throw new Error('網址格式不對，應該像 https://script.google.com/macros/s/…/exec');
+    if (pw.length < 4) throw new Error('密碼至少 4 個字');
+    const c = { url, pw, rev: 0, pushedAt: 0, on: true, lastOk: 0 };
+    const r = await Cloud.req({ a: 'ping' }, c);
+    let mode = 'merge';
+    if (r.counts.fridges > 0) {
+      if (isPristine()) mode = 'replace';
+      else {
+        mode = await choose(`雲端已經有資料（設備 ${r.counts.fridges} 台、溫度紀錄 ${r.counts.recs} 筆），這台裝置也有資料。要怎麼處理？`,
+          [['merge', '合併（兩邊都保留）'], ['replace', '改用雲端資料（這台的資料清掉）'], ['cancel', '取消']]);
+        if (!mode || mode === 'cancel') return null;
+      }
+    }
+    if (mode === 'replace') { const me = db.me; db = blank(); db.me = me; }
+    db.cloud = c;
+    if (r.sheet) c.sheet = r.sheet;
+    await flush();
+    const ok = await Cloud.sync();
+    Cloud.start();
+    if (!ok) throw new Error(Cloud.err || '同步失敗');
+    return { claimed: r.claimed, mode, cloudHad: r.counts.fridges > 0 };
+  }
+  function cloudInfo() {
+    const c = db.cloud;
+    if (!Cloud.on()) return '';
+    const st = Cloud.state === 'ok' ? `<span class="dl up">● 已同步</span>` : Cloud.state === 'sync' ? '同步中…' : `<span class="dl down">● ${esc(Cloud.err || '尚未同步')}</span>`;
+    return `${st}${c.lastOk ? `・最後同步 ${new Date(c.lastOk).toLocaleString('zh-TW', { hour12: false })}` : ''}`;
+  }
+
+  // ------------------------------------------------------------------ 設定
+  function viewSettings(el) {
+    const c = db.cloud || {};
+    const on = Cloud.on();
+    const list = liveFridges();
+    const slots = liveSlots();
+    const nDays = Object.keys(db.recs).filter((d) => Object.values(db.recs[d]).some((ss) => Object.values(ss).some(hasT))).length;
+    el.innerHTML = `
+      <div class="page-head"><h2>設定</h2></div>
+      <section class="card form">
+        <label>店名（顯示在標題、記錄表與匯出檔名）<input id="shopname" value="${esc(db.shop)}" placeholder="例如：碧潭餐廳"></label>
+      </section>
+      <section class="card">
+        <div class="card-head"><h3>冰箱設備</h3><div class="sp"></div><button class="btn primary" data-act="addf">＋ 新增設備</button></div>
+        <p class="hint pad">選類型會帶入法規標準（冷藏 7°C 以下、冷凍 -18°C 以下、熱藏 60°C 以上），也可以自己改上下限；空白表示不限。暫時不用的設備勾「停用」。</p>
+        ${list.length ? `<div class="tbl-wrap"><table class="ftable"><thead><tr><th class="mv">排序</th><th>名稱</th><th>類型</th><th class="r">下限 °C</th><th class="r">上限 °C</th><th class="c">停用</th><th></th></tr></thead><tbody>
+        ${list.map((f, i) => `<tr data-id="${f.id}" class="${f.off ? 'off' : ''}">
+          <td class="mv"><button class="btn icon sm" data-act="up" ${i ? '' : 'disabled'} title="上移">▲</button><button class="btn icon sm" data-act="down" ${i < list.length - 1 ? '' : 'disabled'} title="下移">▼</button></td>
+          <td class="f-name"><input data-f="name" value="${esc(f.name)}" placeholder="設備名稱" aria-label="設備名稱"></td>
+          <td class="f-type"><select data-f="type" aria-label="類型">${Object.entries(TYPES).map(([k, t]) => `<option value="${k}" ${f.type === k ? 'selected' : ''}>${t.n}</option>`).join('')}</select></td>
+          <td class="r f-lo"><label><span>下限</span><input data-f="lo" type="text" inputmode="decimal" value="${f.lo ?? ''}" placeholder="不限"></label></td>
+          <td class="r f-hi"><label><span>上限</span><input data-f="hi" type="text" inputmode="decimal" value="${f.hi ?? ''}" placeholder="不限"></label></td>
+          <td class="c f-off"><label><input type="checkbox" data-f="off" ${f.off ? 'checked' : ''}><span>停用</span></label></td>
+          <td class="f-del"><button class="btn icon sm danger" data-act="delf" title="刪除">✕</button></td></tr>`).join('')}
+        </tbody></table></div>` : '<p class="empty">尚無設備</p>'}
+      </section>
+      <div class="two">
+        <section class="card">
+          <div class="card-head"><h3>記錄時段</h3><div class="sp"></div><button class="btn" data-act="adds" ${slots.length >= 6 ? 'disabled' : ''}>＋ 新增時段</button></div>
+          <p class="hint pad">到了時間還沒記錄，「每日記錄」會出現提醒。</p>
+          <div class="slots pad">${slots.map((s) => `<div class="slotrow" data-sid="${s.id}"><input data-s="name" value="${esc(s.name)}" placeholder="名稱" aria-label="時段名稱"><input data-s="time" type="time" value="${esc(s.time)}" aria-label="時間"><button class="btn icon sm danger" data-act="dels" title="刪除時段">✕</button></div>`).join('') || '<p class="muted">沒有時段</p>'}</div>
+        </section>
+        <section class="card">
+          <div class="card-head"><h3>記錄人名單</h3></div>
+          <p class="hint pad">一行一位，記錄時可直接選。</p>
+          <div class="pad"><textarea id="staff" rows="5" placeholder="王小明&#10;李小華">${esc(db.staff.join('\n'))}</textarea></div>
+        </section>
+      </div>
+      <section class="card">
+        <div class="card-head"><h3>☁ Google 雲端同步</h3></div>
+        ${on ? `
+          <p class="pad">資料存在你的 Google 試算表，所有連線的手機、電腦自動同步。<br><span id="cloudinfo">${cloudInfo()}</span></p>
+          <div class="btns pad">
+            <button class="btn primary" data-act="syncnow">立即同步</button>
+            ${c.sheet ? `<a class="btn" href="${esc(c.sheet)}" target="_blank" rel="noopener" data-act="opensheet">開啟試算表</a>` : ''}
+            <button class="btn" data-act="pushall" title="把這台裝置的所有資料重新上傳一次（雲端較新的資料不會被蓋掉）">全部重新上傳</button>
+            <button class="btn" data-act="setpw">修改密碼</button>
+            <button class="btn danger" data-act="disconnect">中斷連線</button>
+          </div>`
+        : `
+          <p class="muted pad">連上 Google 試算表後，資料會存在雲端，多台手機和電腦可以共用同一份記錄表。</p>
+          <div class="form pad cloudform">
+            <label>雲端網址<input id="curl" value="${esc(c.url || window.FRIDGE_CLOUD_URL || '')}" placeholder="https://script.google.com/macros/s/…/exec" spellcheck="false" autocomplete="off"></label>
+            <label>同步密碼<input id="cpw" type="password" autocomplete="current-password" placeholder="至少 4 個字"></label>
+            <button class="btn primary" data-act="connect">連線</button>
+          </div>
+          <p class="muted pad">第一台連線時輸入的密碼會成為雲端密碼，其他裝置請輸入同一組密碼。</p>`}
+      </section>
+      <section class="card">
+        <div class="card-head"><h3>資料備份</h3></div>
+        <p class="muted pad">目前有 ${list.length} 台設備、${nDays} 天的溫度紀錄。
+          ${DESK ? '<br>本機資料檔：<code id="dpath">…</code>（每天自動保留一份備份）' : on ? '' : '<br>資料存在這個瀏覽器裡，換手機或清除瀏覽資料前請先匯出備份。'}</p>
+        <div class="btns pad"><button class="btn" data-act="backup">⬇ 匯出備份（JSON）</button>
+          <label class="btn">⬆ 從備份還原<input type="file" id="restore" accept=".json,application/json" hidden></label></div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h3>試用與清除</h3></div>
+        <div class="btns pad">
+          <button class="btn" data-act="demo" ${on ? 'disabled title="連線雲端時不能產生示範資料"' : ''}>產生近 60 天示範紀錄</button>
+          <button class="btn danger" data-act="clearrecs">清除所有溫度紀錄</button>
+          <button class="btn danger" data-act="reset" ${on ? 'disabled title="請先中斷雲端連線"' : ''}>全部重設</button>
+        </div>
+        <p class="muted pad">示範資料只會填入沒有紀錄的時段，不會覆蓋已輸入的溫度。</p>
+      </section>
+      <p class="muted center">冰箱溫度記錄表系統 v${VERSION}${DESK ? '（桌面版）' : ''}・快捷鍵 Alt+1～4 切換頁面</p>`;
+    if (DESK) api().then((x) => x.data_path()).then((p) => { const e = $('#dpath'); if (e) e.textContent = p; });
+
+    const slotsChanged = () => { db.slotsAt = now(); save(); updateDot(); };
+    el.oninput = (e) => {
+      const t = e.target;
+      if (t.id === 'shopname') { db.shop = t.value.trim(); db.shopAt = now(); renderShop(); save(); return; }
+      if (t.dataset.s) {
+        const s = slotById(t.closest('.slotrow').dataset.sid);
+        if (t.dataset.s === 'name') s.name = t.value.trim() || '未命名'; else s.time = t.value;
+        slotsChanged(); return;
+      }
+      const f = t.dataset.f; if (!f) return;
+      const tr = t.closest('tr'), x = fridgeById(tr.dataset.id);
+      if (f === 'name') x.name = t.value.trim();
+      else if (f === 'lo' || f === 'hi') { const p = parseTemp(t.value); t.classList.toggle('warn', !!p.bad); if (p.bad) return; x[f] = p.empty ? null : p.t; }
+      else if (f === 'off') { x.off = t.checked; tr.classList.toggle('off', x.off); }
+      else if (f === 'type') {
+        x.type = t.value;
+        const T = TYPES[x.type];
+        if (x.type !== 'other') { x.lo = T.lo; x.hi = T.hi; $('[data-f=lo]', tr).value = x.lo ?? ''; $('[data-f=hi]', tr).value = x.hi ?? ''; }
+      }
+      x.at = now(); save();
+    };
+    el.onkeydown = (e) => { if (e.key === 'Enter' && e.target.id === 'cpw') { e.preventDefault(); $('[data-act=connect]', el).click(); } };
+    el.onchange = async (e) => {
+      const t = e.target;
+      if (t.dataset.f === 'name' && !t.value.trim()) { t.classList.add('warn'); toast('設備名稱不能空白'); }
+      if (t.id === 'staff') {
+        db.staff = [...new Set(t.value.split(/[\n,，、]/).map((s) => s.trim()).filter(Boolean))];
+        db.staffAt = now(); save(); toast('已儲存記錄人名單');
+        return;
+      }
+      if (t.id !== 'restore' || !t.files[0]) return;
+      try {
+        const d = norm(JSON.parse(await t.files[0].text()));
+        const n = Object.keys(d.recs).length;
+        if (!confirm(`還原這份備份？\n設備 ${d.fridges.filter((x) => !x.deleted).length} 台、紀錄 ${n} 天。\n\n${Cloud.on() ? '備份內容會覆蓋雲端上相同日期、時段、設備的資料。' : '目前的資料會被完全取代。'}`)) return;
+        if (Cloud.on()) {
+          const tt = now();
+          d.fridges.forEach((x) => { x.at = tt; });
+          for (const v of Object.values(d.recs)) for (const ss of Object.values(v)) for (const r of Object.values(ss)) r.at = tt;
+          d.slotsAt = tt; d.staffAt = tt; if (d.shop) d.shopAt = tt;
+          d.cloud = db.cloud;
+        } else delete d.cloud;
+        d.me = db.me;
+        db = d; await flush(); renderShop(); viewSettings(el); toast('已還原備份');
+        Cloud.schedule(200);
+      } catch (err) { alert('無法讀取備份：' + err.message); } finally { t.value = ''; }
+    };
+    el.onclick = async (e) => {
+      const b = e.target.closest('[data-act]'); if (!b) return;
+      const a = b.dataset.act;
+      if (a === 'addf') {
+        const last = list[list.length - 1];
+        const type = last ? last.type : 'chill';
+        const ord = Math.max(0, ...db.fridges.map((x) => x.ord)) + 1;
+        const f = { id: uid(), name: '', type, lo: TYPES[type].lo, hi: TYPES[type].hi, off: false, deleted: false, ord, at: now() };
+        db.fridges.push(f); save(); viewSettings(el);
+        const inp = $(`tr[data-id="${f.id}"] [data-f=name]`, el); inp.scrollIntoView({ block: 'center' }); inp.focus();
+      } else if (a === 'up' || a === 'down') {
+        const tr = b.closest('tr'), x = fridgeById(tr.dataset.id);
+        const i = list.indexOf(x), j = a === 'up' ? i - 1 : i + 1;
+        if (!list[j]) return;
+        const o = list[j], tt = now();
+        [x.ord, o.ord] = [o.ord, x.ord];
+        if (x.ord === o.ord) x.ord += a === 'up' ? -0.5 : 0.5;
+        x.at = o.at = tt;
+        sortFridges(db); save(); viewSettings(el);
+      } else if (a === 'delf') {
+        const x = fridgeById(b.closest('tr').dataset.id);
+        const used = Object.values(db.recs).some((v) => v[x.id] && Object.values(v[x.id]).some(hasT));
+        if (!confirm(`刪除「${x.name || '未命名'}」？${used ? '\n\n這台設備已有溫度紀錄，刪除後月報表就不會再列出它。\n（只是暫時不用的話，勾「停用」就好）' : ''}`)) return;
+        x.deleted = true; x.at = now(); save(); viewSettings(el);
+      } else if (a === 'adds') {
+        db.slots.push({ id: 's' + uid(), name: '新時段', time: '12:00', deleted: false });
+        slotsChanged(); viewSettings(el);
+        const r = $$('.slotrow [data-s=name]', el).pop(); if (r) { r.focus(); r.select(); }
+      } else if (a === 'dels') {
+        const s = slotById(b.closest('.slotrow').dataset.sid);
+        if (!confirm(`刪除時段「${s.name}」？\n已記錄的溫度會保留在月報表中。`)) return;
+        s.deleted = true; slotsChanged(); viewSettings(el);
+      } else if (a === 'connect') {
+        b.disabled = true; b.textContent = '連線中…';
+        try {
+          const r = await connectCloud($('#curl').value, $('#cpw').value);
+          if (r) {
+            renderShop();
+            toast(r.claimed ? '已連線，這組密碼已設為雲端密碼' : r.cloudHad ? (r.mode === 'replace' ? '已連線，已下載雲端資料' : '已連線，資料已合併') : '已連線，資料已上傳到雲端', 4000);
+          }
+        } catch (err) { alert('連線失敗：' + err.message); }
+        viewSettings(el);
+      } else if (a === 'syncnow') {
+        const ok = await Cloud.sync(); toast(ok ? '同步完成' : '同步失敗：' + Cloud.err);
+      } else if (a === 'pushall') {
+        if (!confirm('把這台裝置的所有資料重新上傳一次？（雲端上較新的資料不會被蓋掉）')) return;
+        db.cloud.pushedAt = 0; db.cloud.rev = 0;
+        const ok = await Cloud.sync(); toast(ok ? '已重新上傳並下載雲端資料' : '失敗：' + Cloud.err);
+      } else if (a === 'opensheet') {
+        if (DESK) { e.preventDefault(); (await api()).open_url(db.cloud.sheet); }
+      } else if (a === 'setpw') {
+        const np = prompt('輸入新的同步密碼（至少 4 個字）。\n改完後其他裝置要用新密碼重新連線。');
+        if (np == null) return;
+        if (np.length < 4) return alert('密碼至少 4 個字');
+        if (prompt('再輸入一次新密碼確認：') !== np) return alert('兩次輸入不一樣，沒有修改');
+        try { await Cloud.req({ a: 'setpw', newpw: np }); db.cloud.pw = np; await flush(); toast('密碼已修改'); } catch (err) { alert('修改失敗：' + err.message); }
+      } else if (a === 'disconnect') {
+        if (!confirm('中斷這台裝置的雲端連線？\n資料會留在這台和雲端，之後可以再連線。')) return;
+        await Cloud.sync();
+        db.cloud.on = false; db.cloud.pw = '';
+        await flush(); Cloud.start(); viewSettings(el); toast('已中斷雲端連線');
+      } else if (a === 'backup') {
+        const copy = { ...db }; delete copy.cloud; delete copy.me;
+        await saveFile(JSON.stringify(copy, null, 1), fname(`${db.shop ? db.shop + '_' : ''}冰箱溫度備份_${today().replace(/-/g, '')}.json`), 'application/json');
+      } else if (a === 'demo') {
+        if (Cloud.on()) return toast('連線雲端時不能產生示範資料');
+        if (!activeFridges().length || !liveSlots().length) return toast('請先建立設備與時段');
+        if (!confirm('在近 60 天沒有紀錄的時段填入隨機的示範溫度？（之後可用「清除所有溫度紀錄」移除）')) return;
+        const n = demoData(60); save(); viewSettings(el); toast(`已產生 ${n} 筆示範紀錄`);
+      } else if (a === 'clearrecs') {
+        if (!nDays) return toast('沒有溫度紀錄');
+        if (prompt(`將刪除全部 ${nDays} 天的溫度紀錄${Cloud.on() ? '（雲端也會一起清除）' : ''}，無法復原。\n確定請輸入「清除」：`) !== '清除') return;
+        if (Cloud.on()) {
+          const tt = now();
+          for (const v of Object.values(db.recs)) for (const ss of Object.values(v)) for (const r of Object.values(ss)) if (hasT(r) || r.act) Object.assign(r, { t: null, act: '', rt: null, x: 0, at: tt });
+        } else db.recs = {};
+        save(); viewSettings(el); updateDot(); toast('已清除溫度紀錄');
+      } else if (a === 'reset') {
+        if (Cloud.on()) return toast('請先中斷雲端連線');
+        if (prompt('將刪除全部設備、時段與溫度紀錄並恢復預設值，無法復原。\n確定請輸入「重設」：') !== '重設') return;
+        const keep = db.cloud;
+        db = seed(); if (keep) db.cloud = keep;
+        save(); renderShop(); viewSettings(el); updateDot(); toast('已重設');
+      }
+    };
+  }
+  function demoData(nDays) {
+    const fs = activeFridges(), ss = liveSlots();
+    const staff = db.staff.length ? db.staff : ['王小明', '李小華', '陳美玲'];
+    let n = 0;
+    const tt = now();
+    for (let i = nDays - 1; i >= 0; i--) {
+      const d = addD(today(), -i);
+      for (const s of ss) {
+        if (!dueSlot(s, d)) continue;
+        if (Math.random() < 0.03) continue; // 偶爾漏記
+        const by = staff[Math.floor(Math.random() * staff.length)];
+        for (const f of fs) {
+          if (hasT(recOf(d, f.id, s.id))) continue;
+          const base = f.type === 'freeze' ? -20 : f.type === 'hot' ? 68 : f.hi != null ? f.hi - 3.5 : 4;
+          let t = Math.round((base + (Math.random() - 0.5) * 3) * 10) / 10;
+          const spike = Math.random() < 0.03;
+          if (spike) t = Math.round(((f.hi != null ? f.hi : base) + 1 + Math.random() * 3) * 10) / 10;
+          const x = isBad(f, t) ? 1 : 0;
+          const v = db.recs[d] || (db.recs[d] = {});
+          (v[f.id] || (v[f.id] = {}))[s.id] = {
+            t, ts: `${d} ${s.time || '12:00'}`.replace(/(\d\d):(\d\d)$/, (m0, h, mm) => `${h}:${pad(Math.min(59, +mm + Math.floor(Math.random() * 20)))}`),
+            by, act: x ? ACTIONS[Math.floor(Math.random() * 4)] : '', rt: x ? Math.round((base + 0.5) * 10) / 10 : null, x, at: tt,
+          };
+          n++;
+        }
+      }
+    }
+    return n;
+  }
+
+  // ------------------------------------------------------------------ 啟動
+  document.addEventListener('keydown', (e) => {
+    if (e.altKey && !e.ctrlKey && /^[1-4]$/.test(e.key)) {
+      e.preventDefault();
+      location.hash = '#/' + ['day', 'month', 'chart', 'settings'][+e.key - 1];
+    }
+  });
+  window.addEventListener('hashchange', route);
+
+  async function start() {
+    let raw = null;
+    try { raw = await loadRaw(); } catch (e) { console.error(e); }
+    try { db = raw ? norm(JSON.parse(raw)) : null; } catch (e) {
+      alert('資料讀取失敗：' + e.message + '\n將以預設設備啟動（原資料不會被覆蓋，直到你修改）。');
+      db = seed();
+    }
+    if (!db) { db = seed(); await flush(); }
+    renderShop();
+    route();
+    setStatus('');
+    Cloud.start();
+    if (!DESK && 'serviceWorker' in navigator && location.protocol.startsWith('http')) {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    }
+  }
+  // 測試用
+  window.__fridge = { get db() { return db; }, flush, Cloud, connectCloud, demoData, monthData, xlsxSheets, buildXlsx: (M) => b64(XLSXW.build(xlsxSheets(M))), dayStats, parseTemp, VERSION };
+  start();
+})();
