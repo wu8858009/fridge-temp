@@ -1,7 +1,7 @@
 /* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.2.1';
+  const VERSION = '1.3.0';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具
@@ -173,9 +173,10 @@
 
   // ------------------------------------------------------------------ 資料
   // 依「食品良好衛生規範準則」：冷藏 7°C 以下、冷凍 -18°C 以下；熱藏 60°C 以上
+  // 下限是實務建議：冷藏低於 0°C 食材會結凍，冷凍低於 -25°C 多半是溫控異常
   const TYPES = {
-    chill: { n: '冷藏', lo: null, hi: 7 },
-    freeze: { n: '冷凍', lo: null, hi: -18 },
+    chill: { n: '冷藏', lo: 0, hi: 7 },
+    freeze: { n: '冷凍', lo: -25, hi: -18 },
     hot: { n: '熱藏', lo: 60, hi: null },
     other: { n: '其他', lo: null, hi: null },
   };
@@ -1081,7 +1082,7 @@
       </section>
       <section class="card">
         <div class="card-head"><h3>冰箱設備</h3><div class="sp"></div><button class="btn primary" data-act="addf">＋ 新增設備</button></div>
-        <p class="hint pad">選類型會帶入法規標準（冷藏 7°C 以下、冷凍 -18°C 以下、熱藏 60°C 以上），也可以自己改上下限；空白表示不限。暫時不用的設備勾「停用」。<br>「區域」填一樣的設備（例如 車前、車後）會在每日記錄分組顯示，月報表每個區域印成一張。</p>
+        <p class="hint pad">選類型會帶入標準範圍（冷藏 0～7°C、冷凍 -25～-18°C、熱藏 60°C 以上；上限依法規，下限為防止結凍或溫控異常的建議值），也可以自己改上下限；空白表示不限。暫時不用的設備勾「停用」。<br>「區域」填一樣的設備（例如 車前、車後）會在每日記錄分組顯示，月報表每個區域印成一張。</p>
         <datalist id="arealist">${[...new Set(['車前', '車後', ...list.map((f) => f.area).filter(Boolean)])].map((a) => `<option value="${esc(a)}">`).join('')}</datalist>
         ${list.length ? `<div class="tbl-wrap"><table class="ftable"><thead><tr><th class="mv">排序</th><th>名稱</th><th>區域</th><th>類型</th><th class="r">下限 °C</th><th class="r">上限 °C</th><th class="c">停用</th><th></th></tr></thead><tbody>
         ${list.map((f, i) => `<tr data-id="${f.id}" class="${f.off ? 'off' : ''}">
@@ -1319,6 +1320,19 @@
   });
   window.addEventListener('hashchange', route);
 
+  // v1.3.0：舊資料裡沒有下限、上限仍是預設值的冷藏／冷凍設備，補上預設下限（只做一次，之後可自行清空）
+  function addLowerBounds() {
+    if (db.loMig) return;
+    let n = 0;
+    for (const f of db.fridges) {
+      const T = TYPES[f.type];
+      if ((f.type === 'chill' || f.type === 'freeze') && f.lo == null && f.hi === T.hi) { f.lo = T.lo; f.at = now(); n++; }
+    }
+    db.loMig = 1;
+    save();
+    if (n) setTimeout(() => toast(`已為 ${n} 台冷藏／冷凍設備加上預設下限（冷藏 0°C、冷凍 -25°C）`, 4500), 600);
+  }
+
   async function start() {
     let raw = null;
     try { raw = await loadRaw(); } catch (e) { console.error(e); }
@@ -1327,6 +1341,7 @@
       db = seed();
     }
     if (!db) { db = seed(); await flush(); }
+    addLowerBounds();
     renderShop();
     route();
     setStatus('');
