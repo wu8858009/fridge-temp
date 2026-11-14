@@ -103,7 +103,14 @@ code { font-size: 12px; word-break: break-all; background: var(--surface-2); pad
 .dlg .btns { flex-direction: column; }
 .dlg .btns .btn { width: 100%; min-height: 42px; }
 
-main { padding: 16px 20px 40px; max-width: 1400px; margin: 0 auto; }
+/* 導覽列固定：整個頁面不捲動，只有內容區（#app）捲動，iPhone 彈跳或叫出鍵盤時頂列、底部導覽也不會跑掉 */
+html, body { height: 100%; }
+body { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; overscroll-behavior: none; }
+.top { flex: none; }
+main {
+  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+  padding: 16px max(20px, calc((100% - 1400px) / 2)) 40px;
+}
 .page-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
 
 /* ---- 按鈕與輸入 ---- */
@@ -311,7 +318,8 @@ tbody tr:last-child td { border-bottom: 0; }
   @page { size: A4 portrait; margin: 10mm; }
   body { background: #fff; }
   .top, .no-print, .toast, .tt, .modal { display: none !important; }
-  main { padding: 0; max-width: none; }
+  html, body { height: auto; overflow: visible; display: block; }
+  main { padding: 0; max-width: none; overflow: visible; }
   .sheets { display: block; }
   .sheet { box-shadow: none; padding: 0; max-width: none; border-radius: 0; overflow: visible; break-after: page; page-break-after: always; }
   .sheet:last-child { break-after: auto; page-break-after: auto; }
