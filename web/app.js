@@ -1,7 +1,7 @@
 /* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.3.0';
+  const VERSION = '1.3.1';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具
@@ -249,6 +249,20 @@
     const e = f[sid] || (f[sid] = { t: null, ts: '', by: '', act: '', rt: null, x: 0, at: 0 });
     Object.assign(e, patch, { at: now() });
     return e;
+  }
+  // 依設備目前的標準範圍重新判斷正常／異常（範圍改了，在範圍內的舊紀錄也要顯示正常）；回傳變動筆數
+  function recheckRecs(f) {
+    let n = 0;
+    const t = now();
+    for (const v of Object.values(db.recs)) {
+      const ss = v[f.id]; if (!ss) continue;
+      for (const e of Object.values(ss)) {
+        if (!hasT(e)) continue;
+        const x = isBad(f, e.t) ? 1 : 0;
+        if (e.x !== x) { e.x = x; e.at = t; n++; }
+      }
+    }
+    return n;
   }
   function isBad(f, t) {
     if (t == null || !f) return false;
@@ -1167,7 +1181,9 @@
         const T = TYPES[x.type];
         if (x.type !== 'other') { x.lo = T.lo; x.hi = T.hi; $('[data-f=lo]', tr).value = x.lo ?? ''; $('[data-f=hi]', tr).value = x.hi ?? ''; }
       }
-      x.at = now(); save();
+      x.at = now();
+      if (f === 'lo' || f === 'hi' || f === 'type') { const n = recheckRecs(x); if (n) toast(`已依新範圍重新判斷 ${n} 筆紀錄`); }
+      save();
     };
     el.onkeydown = (e) => { if (e.key === 'Enter' && e.target.id === 'cpw') { e.preventDefault(); $('[data-act=connect]', el).click(); } };
     el.onchange = async (e) => {
@@ -1342,6 +1358,7 @@
     }
     if (!db) { db = seed(); await flush(); }
     addLowerBounds();
+    if (db.fridges.reduce((n, f) => n + recheckRecs(f), 0)) save();
     renderShop();
     route();
     setStatus('');
