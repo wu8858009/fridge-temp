@@ -414,3 +414,5 @@ body.kp-open main { padding-bottom: calc(var(--kph, 290px) + 24px); }
 body.kp-open .modal { align-items: start; padding-top: 8px; padding-bottom: calc(var(--kph, 290px) + 8px); }
 body.kp-open .dlg { max-height: calc(100vh - var(--kph, 290px) - 16px); max-height: calc(100dvh - var(--kph, 290px) - 16px); }
 @media print { #kp { display: none !important; } }
+input.kp-on { outline: 3px solid var(--brand); outline-offset: -1px; border-color: transparent; }
+input[readonly][data-kp] { cursor: pointer; -webkit-user-select: none; user-select: none; caret-color: transparent; }
