@@ -393,3 +393,24 @@ tbody tr:last-child td { border-bottom: 0; }
   .slotrow { grid-template-columns: 1fr 110px auto; }
   th, td { padding: 6px 8px; }
 }
+
+/* ---- 溫度數字鍵盤（觸控裝置） ---- */
+#kp {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 75; background: var(--surface-2); border-top: 1px solid var(--line);
+  padding: 6px 8px max(8px, env(safe-area-inset-bottom)); box-shadow: 0 -6px 20px rgba(0, 0, 0, .18); user-select: none; -webkit-user-select: none;
+}
+.kp-head { display: flex; align-items: center; justify-content: space-between; padding: 2px 4px 6px; font-weight: 700; color: var(--text-2); font-size: 14px; }
+.kp-head button { font: inherit; font-size: 14px; font-weight: 700; border: 0; background: none; color: var(--brand); padding: 4px 8px; }
+.kp-keys { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; max-width: 520px; margin: 0 auto; }
+.kp-keys button {
+  font: inherit; font-size: 22px; font-weight: 600; height: 52px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--text); touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+.kp-keys button:active { background: var(--brand-soft); }
+.kp-keys .k-neg { font-size: 28px; color: #2563eb; font-weight: 800; }
+.kp-keys .k-del, .kp-keys .k-clr { font-size: 17px; color: var(--text-2); }
+.kp-keys .k-next { grid-column: span 2; background: var(--brand); border-color: var(--brand); color: var(--brand-ink); font-size: 18px; font-weight: 700; }
+body.kp-open main { padding-bottom: calc(var(--kph, 290px) + 24px); }
+body.kp-open .modal { align-items: start; padding-top: 8px; padding-bottom: calc(var(--kph, 290px) + 8px); }
+body.kp-open .dlg { max-height: calc(100vh - var(--kph, 290px) - 16px); max-height: calc(100dvh - var(--kph, 290px) - 16px); }
+@media print { #kp { display: none !important; } }

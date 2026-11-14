@@ -1,7 +1,7 @@
 /* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.1.2';
+  const VERSION = '1.2.0';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具
@@ -27,6 +27,81 @@
   const t1 = (t) => (t == null ? '' : (Math.round(t * 10) / 10).toFixed(1));
   const daysInMonth = (ym) => new Date(+ym.slice(0, 4), +ym.slice(5, 7), 0).getDate();
   const addM = (ym, n) => { const d = new Date(+ym.slice(0, 4), +ym.slice(5, 7) - 1 + n, 1); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; };
+
+  // ------------------------------------------------------------------ 溫度數字鍵盤（觸控裝置；手機內建數字鍵沒有負號）
+  const TOUCH = matchMedia('(pointer: coarse)').matches;
+  const IM = TOUCH ? 'none' : 'decimal';
+  const KP = {
+    el: null, inp: null, start: '', fresh: false,
+    build() {
+      const k = document.createElement('div');
+      k.id = 'kp'; k.hidden = true;
+      const lab = { del: '⌫', neg: '−', clr: '清除', next: '下一格' };
+      k.innerHTML = `<div class="kp-head"><span id="kplabel"></span><button data-k="hide" aria-label="收起鍵盤">完成 ⌄</button></div>
+        <div class="kp-keys">${['7', '8', '9', 'del', '4', '5', '6', 'neg', '1', '2', '3', '.', '0', 'clr', 'next']
+          .map((x) => `<button data-k="${x}" class="k-${x === '.' ? 'dot' : x}${/\d/.test(x) ? ' num' : ''}">${lab[x] || x}</button>`).join('')}</div>`;
+      // 按鍵用 pointerdown 並取消預設，輸入框才不會失去焦點
+      k.addEventListener('pointerdown', (e) => { e.preventDefault(); const b = e.target.closest('[data-k]'); if (b) this.key(b.dataset.k); });
+      document.body.append(k);
+      this.el = k;
+    },
+    label(inp) {
+      if (inp.matches('[data-t]')) {
+        const f = fridgeById(inp.closest('.fcard').dataset.fid), sl = slotById(inp.closest('.srow').dataset.sid);
+        return `${f ? f.name : ''}・${sl ? sl.name : ''}`;
+      }
+      if (inp.id === 'xrt') return '複測溫度';
+      return inp.dataset.f === 'lo' ? '下限溫度' : '上限溫度';
+    },
+    show(inp) {
+      if (!this.el) this.build();
+      this.inp = inp; this.start = inp.value; this.fresh = true;
+      $('#kplabel', this.el).textContent = this.label(inp) + '（°C）';
+      $('[data-k=next]', this.el).textContent = inp.matches('[data-t]') ? '下一格' : '完成';
+      this.el.hidden = false;
+      document.body.classList.add('kp-open');
+      document.documentElement.style.setProperty('--kph', this.el.offsetHeight + 'px');
+      setTimeout(() => inp.scrollIntoView({ block: 'center', behavior: 'smooth' }), 50);
+    },
+    hide() {
+      if (this.el) this.el.hidden = true;
+      document.body.classList.remove('kp-open');
+      this.inp = null;
+    },
+    set(v) { this.inp.value = v; this.inp.dispatchEvent(new Event('input', { bubbles: true })); },
+    commit() {
+      const inp = this.inp;
+      if (inp && inp.value !== this.start) { this.start = inp.value; inp.dispatchEvent(new Event('change', { bubbles: true })); }
+    },
+    key(k) {
+      const inp = this.inp; if (!inp) return;
+      if (k === 'hide') { this.commit(); inp.blur(); return; }
+      if (k === 'next') {
+        this.commit();
+        if (!inp.matches('[data-t]') || !document.contains(inp)) { inp.blur(); return; }
+        const all = $$('[data-t]'), nx = all[all.indexOf(inp) + 1];
+        if (nx && !$('.modal')) nx.focus(); else inp.blur();
+        return;
+      }
+      const cur = inp.value;
+      let v = this.fresh ? '' : cur;
+      if (k === 'clr') v = '';
+      else if (k === 'del') v = cur.slice(0, -1);
+      else if (k === 'neg') v = cur.startsWith('-') ? cur.slice(1) : '-' + cur;
+      else if (k === '.') { if (v.includes('.')) return; v = (v === '' || v === '-' ? v + '0' : v) + '.'; }
+      else { if (/\.\d$/.test(v) || (!v.includes('.') && v.replace('-', '').length >= 3)) return; v += k; }
+      this.fresh = false;
+      this.set(v);
+    },
+  };
+  if (TOUCH) {
+    document.addEventListener('focusin', (e) => { if (e.target.matches && e.target.matches('[data-kp]')) KP.show(e.target); });
+    document.addEventListener('focusout', (e) => {
+      if (!e.target.matches || !e.target.matches('[data-kp]')) return;
+      if (KP.inp === e.target) KP.commit();
+      setTimeout(() => { const a = document.activeElement; if (!(a && a.matches && a.matches('[data-kp]'))) KP.hide(); }, 30);
+    });
+  }
 
   function toast(msg, ms = 2600) {
     const t = $('#toast');
@@ -330,7 +405,7 @@
     const act = has && e.x ? `<button class="actbox${e.act.trim() ? '' : ' open'}" data-act="act">${e.act.trim() ? `處置：${esc(e.act)}${e.rt != null ? `<br>複測 ${deg(e.rt)}${isBad(f, e.rt) ? '（仍異常）' : ''}` : ''}` : '⚠ 尚未填寫異常處置，點這裡填寫'}</button>` : '';
     return `<div class="srow${has ? ' has' : ''}${has && e.x ? ' x' : ''}" data-sid="${s.id}">
       <div class="slot"><b>${esc(s.name)}</b><small>${esc(s.time || '')}</small></div>
-      <div class="tin"><button class="btn icon sign" data-act="sign" tabindex="-1" title="正負號">±</button><input data-t type="text" inputmode="decimal" autocomplete="off" value="${has ? t1(e.t) : ''}" placeholder="${f.type === 'freeze' ? '-18' : f.type === 'hot' ? '65' : '4'}" aria-label="${esc(f.name)} ${esc(s.name)} 溫度"><span class="unit">°C</span></div>
+      <div class="tin"><button class="btn icon sign" data-act="sign" tabindex="-1" title="正負號">±</button><input data-t type="text" inputmode="${IM}" data-kp autocomplete="off" value="${has ? t1(e.t) : ''}" placeholder="${f.type === 'freeze' ? '-18' : f.type === 'hot' ? '65' : '4'}" aria-label="${esc(f.name)} ${esc(s.name)} 溫度"><span class="unit">°C</span></div>
       <div class="st">${st}</div>
       <div class="meta">${meta}</div>
       ${act}
@@ -417,7 +492,7 @@
       <p><b>${esc(f.name)}</b>・${md(date)} ${esc(s ? s.name : '')}：<b class="xv">${deg(e.t)}</b>，標準為 ${esc(rangeText(f))}。請記錄處理方式。</p>
       <div class="chips">${ACTIONS.map((a) => `<button type="button" class="chip" data-chip="${esc(a)}">${esc(a)}</button>`).join('')}</div>
       <label class="fl">處置說明<textarea id="xact" rows="3" placeholder="例如：調低溫控並移出部分食材，30 分鐘後複測">${esc(e.act)}</textarea></label>
-      <label class="fl">複測溫度（°C，可空白）<input id="xrt" type="text" inputmode="decimal" value="${e.rt != null ? t1(e.rt) : ''}" placeholder="${f.type === 'freeze' ? '-18' : '5'}" autocomplete="off"></label>
+      <label class="fl">複測溫度（°C，可空白）<input id="xrt" type="text" inputmode="${IM}" data-kp value="${e.rt != null ? t1(e.rt) : ''}" placeholder="${f.type === 'freeze' ? '-18' : '5'}" autocomplete="off"></label>
       <div class="btns"><button class="btn primary" type="submit">儲存處置</button><button class="btn" type="button" data-k="later">稍後再填</button></div>
     </form>`;
     const close = () => { m.remove(); if (cur.view === 'day') refresh(); };
@@ -1002,8 +1077,8 @@
           <td class="f-name"><input data-f="name" value="${esc(f.name)}" placeholder="設備名稱" aria-label="設備名稱"></td>
           <td class="f-area"><label><span>區域</span><input data-f="area" list="arealist" value="${esc(f.area)}" placeholder="例如 車前" aria-label="區域"></label></td>
           <td class="f-type"><select data-f="type" aria-label="類型">${Object.entries(TYPES).map(([k, t]) => `<option value="${k}" ${f.type === k ? 'selected' : ''}>${t.n}</option>`).join('')}</select></td>
-          <td class="r f-lo"><label><span>下限</span><input data-f="lo" type="text" inputmode="decimal" value="${f.lo ?? ''}" placeholder="不限"></label></td>
-          <td class="r f-hi"><label><span>上限</span><input data-f="hi" type="text" inputmode="decimal" value="${f.hi ?? ''}" placeholder="不限"></label></td>
+          <td class="r f-lo"><label><span>下限</span><input data-f="lo" type="text" inputmode="${IM}" data-kp value="${f.lo ?? ''}" placeholder="不限"></label></td>
+          <td class="r f-hi"><label><span>上限</span><input data-f="hi" type="text" inputmode="${IM}" data-kp value="${f.hi ?? ''}" placeholder="不限"></label></td>
           <td class="c f-off"><label><input type="checkbox" data-f="off" ${f.off ? 'checked' : ''}><span>停用</span></label></td>
           <td class="f-del"><button class="btn icon sm danger" data-act="delf" title="刪除">✕</button></td></tr>`).join('')}
         </tbody></table></div>` : '<p class="empty">尚無設備</p>'}
