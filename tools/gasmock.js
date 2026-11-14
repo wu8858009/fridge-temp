@@ -38,6 +38,7 @@ function makeSheet(name) {
   };
   const sheet = {
     getName: () => name, getLastRow: lastRow,
+    getLastColumn: () => grid().reduce((mx, r) => { let n = (r || []).length; while (n > 0 && (r[n - 1] === '' || r[n - 1] == null)) n--; return Math.max(mx, n); }, 0),
     getRange: (r, c, nr = 1, nc = 1) => range(r, c, nr, nc),
     setFrozenRows() {},
   };

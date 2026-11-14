@@ -1,7 +1,7 @@
 /* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具
@@ -100,14 +100,14 @@
     d.seedAt = now; d.slotsAt = now;
     d.fridges = [
       { name: '冷藏冰箱 1', type: 'chill' }, { name: '冷藏冰箱 2', type: 'chill' }, { name: '冷凍冰箱 1', type: 'freeze' },
-    ].map((x, i) => ({ id: uid() + i, name: x.name, type: x.type, lo: TYPES[x.type].lo, hi: TYPES[x.type].hi, off: false, deleted: false, ord: i + 1, at: now }));
+    ].map((x, i) => ({ id: uid() + i, name: x.name, type: x.type, area: '', lo: TYPES[x.type].lo, hi: TYPES[x.type].hi, off: false, deleted: false, ord: i + 1, at: now }));
     d.slots = [{ id: 's1', name: '早', time: '09:00', deleted: false }, { id: 's2', name: '晚', time: '17:00', deleted: false }];
     return d;
   }
   function normFridge(x, i) {
     const type = TYPES[x.type] ? x.type : 'other';
     return {
-      id: String(x.id), name: String(x.name ?? '').trim(), type,
+      id: String(x.id), name: String(x.name ?? '').trim(), type, area: String(x.area ?? '').trim(),
       lo: numOrNull(x.lo), hi: numOrNull(x.hi), off: !!x.off, deleted: !!x.deleted,
       ord: num(x.ord) || i + 1, at: num(x.at) || 1,
     };
@@ -174,6 +174,15 @@
     return '未設定';
   }
   const typeName = (f) => (TYPES[f.type] || TYPES.other).n;
+  // 區域（例如 車前、車後）：依該區第一台設備的排序決定先後；沒填的歸到「未分區」
+  const NO_AREA = '未分區';
+  const areaOf = (f) => f.area || NO_AREA;
+  const hasAreas = (list = liveFridges()) => list.some((f) => f.area);
+  function byArea(list) {
+    const m = new Map();
+    for (const f of list) { const a = areaOf(f); if (!m.has(a)) m.set(a, []); m.get(a).push(f); }
+    return [...m];
+  }
   // 這個時段某天有哪些冰箱要記錄（停用的不算；當天已有紀錄的仍顯示）
   function fridgesFor(d) {
     const v = db.recs[d] || {};
@@ -259,13 +268,15 @@
       <div id="banner"></div>
       <div class="kpis" id="daykpi"></div>
       ${!fs.length ? '<p class="empty">還沒有冰箱設備，請到「⚙️ 設定」新增。</p>' : !ss.length ? '<p class="empty">還沒有記錄時段，請到「⚙️ 設定」新增（例如：早 09:00、晚 17:00）。</p>' : `
-      <div class="fridges">${fs.map((f) => `
+      ${(hasAreas(fs) ? byArea(fs) : [['', fs]]).map(([area, list]) => `
+      ${area ? `<h3 class="areah">📍 ${esc(area)}<small>${list.length} 台</small></h3>` : ''}
+      <div class="fridges">${list.map((f) => `
         <section class="fcard t-${f.type}" data-fid="${f.id}">
           <div class="fhead"><span class="ficon">${f.type === 'freeze' ? '❄️' : f.type === 'hot' ? '🔥' : '🧊'}</span>
             <div class="fname"><b>${esc(f.name || '未命名')}</b>${f.off ? '<small class="tag">停用</small>' : ''}<small>${typeName(f)}・標準 ${esc(rangeText(f))}</small></div></div>
           ${ss.map((s) => slotRow(date, f, s)).join('')}
         </section>`).join('')}
-      </div>`}
+      </div>`).join('')}`}
       <p class="hint">輸入溫度會自動儲存並記下記錄人與時間。冷凍溫度記得按「±」或直接打負號（例如 -18）。超出標準會要求填寫異常處置。</p>`;
     const go = (s) => { location.hash = '#/day/' + s; };
     renderBanner(); renderDayKpi();
@@ -440,7 +451,8 @@
     const days = Array.from({ length: n }, (_, i) => `${ym}-${pad(i + 1)}`);
     const v = (d) => db.recs[d] || {};
     let fs = liveFridges().filter((f) => !f.off || days.some((d) => Object.values(v(d)[f.id] || {}).some(hasT)));
-    if (fid !== 'all') fs = fs.filter((f) => f.id === fid);
+    if (fid.startsWith('area:')) fs = fs.filter((f) => areaOf(f) === fid.slice(5));
+    else if (fid !== 'all') fs = fs.filter((f) => f.id === fid);
     const used = new Set();
     days.forEach((d) => Object.values(v(d)).forEach((ss) => Object.entries(ss).forEach(([sid, e]) => { if (hasT(e)) used.add(sid); })));
     const ss = db.slots.filter((s) => !s.deleted || used.has(s.id)).sort((a, b) => (a.time || '99') < (b.time || '99') ? -1 : 1);
@@ -489,11 +501,61 @@
       </footer>
     </article>`;
   }
+  // 區域合併頁：同一區的設備放在同一張 A4（日期 × 設備 × 時段）
+  function areaGroups(M) {
+    const m = new Map();
+    for (const S of M.sheets) { const a = areaOf(S.f); if (!m.has(a)) m.set(a, []); m.get(a).push(S); }
+    return [...m].map(([area, Ss]) => {
+      const rows = M.days.map((d, i) => {
+        const by = M.slots.map((s, j) => { const e = Ss.map((S) => S.rows[i].cells[j].e).find((x) => x && x.by); return e ? e.by : ''; });
+        const late = M.slots.map((s, j) => Ss.some((S) => { const e = S.rows[i].cells[j].e; return e && e.ts && e.ts.slice(0, 10) !== d; }));
+        const acts = [];
+        Ss.forEach((S) => S.rows[i].acts.forEach((a) => acts.push(`${S.f.name} ${a}`)));
+        return { d, by, late, acts };
+      });
+      const sum = (k) => Ss.reduce((n, S) => n + S[k], 0);
+      return { area, Ss, rows, done: sum('done'), due: sum('due'), bad: sum('bad') };
+    });
+  }
+  function areaSheetHtml(M, G) {
+    const [y, m] = M.ym.split('-');
+    const name = db.shop || '';
+    const nT = G.Ss.length * M.slots.length;
+    const dense = nT + M.slots.length > 12 ? ' dense' : '';
+    return `<article class="sheet">
+      <header class="sh-head">
+        <h2>${esc(name)}${name ? ' ' : ''}冰箱溫度記錄表</h2>
+        <div class="sh-info"><span>區域：<b>${esc(G.area)}</b>（${G.Ss.length} 台）</span><span><b>${y}</b> 年 <b>${+m}</b> 月</span></div>
+        <div class="sh-std">${G.Ss.map((S) => `<span><b>${esc(S.f.name)}</b>：${typeName(S.f)} ${esc(rangeText(S.f))}</span>`).join('')}</div>
+      </header>
+      <table class="sh-tbl${dense}">
+        <thead>
+          <tr><th rowspan="2" class="c">日期</th><th rowspan="2" class="c">星期</th>${G.Ss.map((S) => `<th colspan="${M.slots.length}" class="c">${esc(S.f.name)}</th>`).join('')}<th colspan="${M.slots.length}" class="c">記錄人</th><th rowspan="2">異常處置</th><th rowspan="2" class="c sign">主管<br>確認</th></tr>
+          <tr>${G.Ss.map(() => M.slots.map((s) => `<th class="c">${esc(s.name)}</th>`).join('')).join('')}${M.slots.map((s) => `<th class="c">${esc(s.name)}</th>`).join('')}</tr>
+        </thead>
+        <tbody>${G.rows.map((r, i) => {
+          const wd = pd(r.d).getDay();
+          return `<tr class="${wd % 6 === 0 ? 'we' : ''}"><td class="c">${+r.d.slice(8)}</td><td class="c">${WD[wd]}</td>${G.Ss.map((S) => S.rows[i].cells.map((c) => (c.e
+            ? `<td class="c t${c.e.x ? ' x' : ''}">${t1(c.e.t)}</td>` : '<td class="c t"></td>')).join('')).join('')}${r.by.map((b, j) => `<td class="c by">${esc(b)}${r.late[j] ? '<small>補</small>' : ''}</td>`).join('')}<td class="acts">${r.acts.map(esc).join('<br>')}</td><td></td></tr>`;
+        }).join('')}</tbody>
+      </table>
+      <footer class="sh-foot">
+        <div class="sh-sum">本月記錄 ${G.done} 筆${G.due ? `（應記錄 ${G.due} 筆，完成 ${Math.round(Math.min(G.done, G.due) / G.due * 100)}%）` : ''}・異常 <b class="${G.bad ? 'xv' : ''}">${G.bad}</b> 次</div>
+        <div class="sh-signs"><span>記錄人：</span><span>主管：</span><span>負責人：</span></div>
+        <div class="sh-note">紅字表示超出標準溫度。依食品良好衛生規範準則，冷藏應保持 7°C 以下、冷凍應保持 -18°C 以下。</div>
+      </footer>
+    </article>`;
+  }
+  // 有設定區域、且不是只看單一設備時，每個區域印成一頁
+  const areaMode = (fid) => hasAreas() && !fridgeById(fid);
   function viewMonth(el, ym, fid) {
-    if (fid !== 'all' && !fridgeById(fid)) fid = 'all';
+    fid = decodeURIComponent(fid);
+    if (fid.startsWith('area:') ? !liveFridges().some((f) => areaOf(f) === fid.slice(5)) : fid !== 'all' && !fridgeById(fid)) fid = 'all';
     const M = monthData(ym, fid);
     const fs = liveFridges();
-    const go = (y, f) => { location.hash = `#/month/${y}/${f}`; };
+    const AM = areaMode(fid);
+    const pages = AM ? areaGroups(M).map((G) => areaSheetHtml(M, G)) : M.sheets.map((S) => sheetHtml(M, S));
+    const go = (y, f) => { location.hash = `#/month/${y}/${encodeURIComponent(f)}`; };
     el.innerHTML = `
       <div class="page-head no-print">
         <div class="datebar">
@@ -505,9 +567,9 @@
         <button class="btn" data-act="xlsx" ${M.sheets.length ? '' : 'disabled'}>⬇ 匯出 Excel</button>
         <button class="btn primary" data-act="print" ${M.sheets.length ? '' : 'disabled'}>🖨 列印 / 存 PDF</button>
       </div>
-      <div class="filters no-print"><div class="seg">${[['all', '全部設備'], ...fs.map((f) => [f.id, f.name || '未命名'])].map(([k, t]) => `<button class="${fid === k ? 'on' : ''}" data-fid="${k}">${esc(t)}</button>`).join('')}</div></div>
-      <p class="hint no-print">每台設備一頁 A4。列印時選「另存為 PDF」即可存成 PDF 檔。</p>
-      ${M.sheets.length ? `<div class="sheets">${M.sheets.map((S) => sheetHtml(M, S)).join('')}</div>` : '<p class="empty">沒有設備可以顯示。</p>'}`;
+      <div class="filters no-print"><div class="seg">${[['all', hasAreas() ? '全部區域' : '全部設備'], ...(hasAreas() ? byArea(fs).map(([a]) => ['area:' + a, '📍 ' + a]) : []), ...fs.map((f) => [f.id, f.name || '未命名'])].map(([k, t]) => `<button class="${fid === k ? 'on' : ''}" data-fid="${esc(k)}">${esc(t)}</button>`).join('')}</div></div>
+      <p class="hint no-print">${AM ? '每個區域一頁 A4（同區的設備放在同一張）' : '每台設備一頁 A4'}，共 ${pages.length} 頁。列印時選「另存為 PDF」即可存成 PDF 檔。${hasAreas() ? '' : '<br>想把設備分區（例如車前、車後）每區印一張，請到「⚙️ 設定」填寫設備的「區域」。'}</p>
+      ${pages.length ? `<div class="sheets">${pages.join('')}</div>` : '<p class="empty">沒有設備可以顯示。</p>'}`;
     el.onclick = (e) => {
       const b = e.target.closest('[data-act],[data-fid]'); if (!b) return;
       if (b.dataset.fid) return go(ym, b.dataset.fid);
@@ -515,17 +577,39 @@
       if (a === 'prev') go(addM(ym, -1), fid);
       else if (a === 'next') go(addM(ym, 1), fid);
       else if (a === 'print') doPrint();
-      else if (a === 'xlsx') exportXlsx(M);
+      else if (a === 'xlsx') exportXlsx(M, AM);
     };
     el.onchange = (e) => { if (e.target.id === 'ym' && validYm(e.target.value)) go(e.target.value, fid); };
   }
   function doPrint() { window.print(); }
 
   // ------------------------------------------------------------------ 匯出 Excel
-  function xlsxSheets(M) {
+  function xlsxSheets(M, AM) {
     const B = 1, T = 5, TX = 6, RX = 7, H = 8;
     const shop = db.shop || '';
-    const out = M.sheets.map((S) => {
+    const out = AM ? areaGroups(M).map((G) => {
+      const head1 = [{ v: '日期', s: B }, { v: '星期', s: B }];
+      G.Ss.forEach((S) => M.slots.forEach((s) => head1.push({ v: `${S.f.name} ${s.name}`, s: B })));
+      M.slots.forEach((s) => head1.push({ v: `${s.name}記錄人`, s: B }));
+      head1.push({ v: '異常處置', s: B });
+      const rows = [
+        [{ v: `${shop}${shop ? ' ' : ''}冰箱溫度記錄表`, s: H }],
+        ['區域', G.area, '月份', `${M.ym.slice(0, 4)} 年 ${+M.ym.slice(5)} 月`, '匯出時間', new Date().toLocaleString('zh-TW', { hour12: false })],
+        ['標準溫度', G.Ss.map((S) => `${S.f.name}：${rangeText(S.f)}`).join('；')],
+        [],
+        head1,
+        ...G.rows.map((r, i) => {
+          const row = [r.d, '週' + WD[pd(r.d).getDay()]];
+          G.Ss.forEach((S) => S.rows[i].cells.forEach((c) => row.push(c.e ? { v: c.e.t, s: c.e.x ? TX : T } : null)));
+          r.by.forEach((b) => row.push(b || null));
+          row.push(r.acts.length ? { v: r.acts.join('；'), s: RX } : null);
+          return row;
+        }),
+        [],
+        ['記錄筆數', G.done, '異常次數', G.bad],
+      ];
+      return { name: G.area, rows, cols: [12, 6, ...G.Ss.flatMap(() => M.slots.map(() => 12)), ...M.slots.map(() => 10), 50], freeze: 5 };
+    }) : M.sheets.map((S) => {
       const f = S.f;
       const head1 = [{ v: '日期', s: B }, { v: '星期', s: B }];
       M.slots.forEach((s) => { head1.push({ v: `${s.name}溫度`, s: B }, { v: `${s.name}記錄人`, s: B }, { v: `${s.name}時間`, s: B }); });
@@ -555,8 +639,8 @@
     return out;
   }
   const fname = (s) => s.replace(/[\\/:*?"<>|]/g, '_');
-  async function exportXlsx(M) {
-    const bytes = XLSXW.build(xlsxSheets(M));
+  async function exportXlsx(M, AM) {
+    const bytes = XLSXW.build(xlsxSheets(M, AM));
     const name = fname(`${db.shop ? db.shop + '_' : ''}冰箱溫度記錄表_${M.ym.replace('-', '')}.xlsx`);
     await saveFile(bytes, name, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   }
@@ -910,11 +994,13 @@
       </section>
       <section class="card">
         <div class="card-head"><h3>冰箱設備</h3><div class="sp"></div><button class="btn primary" data-act="addf">＋ 新增設備</button></div>
-        <p class="hint pad">選類型會帶入法規標準（冷藏 7°C 以下、冷凍 -18°C 以下、熱藏 60°C 以上），也可以自己改上下限；空白表示不限。暫時不用的設備勾「停用」。</p>
-        ${list.length ? `<div class="tbl-wrap"><table class="ftable"><thead><tr><th class="mv">排序</th><th>名稱</th><th>類型</th><th class="r">下限 °C</th><th class="r">上限 °C</th><th class="c">停用</th><th></th></tr></thead><tbody>
+        <p class="hint pad">選類型會帶入法規標準（冷藏 7°C 以下、冷凍 -18°C 以下、熱藏 60°C 以上），也可以自己改上下限；空白表示不限。暫時不用的設備勾「停用」。<br>「區域」填一樣的設備（例如 車前、車後）會在每日記錄分組顯示，月報表每個區域印成一張。</p>
+        <datalist id="arealist">${[...new Set(['車前', '車後', ...list.map((f) => f.area).filter(Boolean)])].map((a) => `<option value="${esc(a)}">`).join('')}</datalist>
+        ${list.length ? `<div class="tbl-wrap"><table class="ftable"><thead><tr><th class="mv">排序</th><th>名稱</th><th>區域</th><th>類型</th><th class="r">下限 °C</th><th class="r">上限 °C</th><th class="c">停用</th><th></th></tr></thead><tbody>
         ${list.map((f, i) => `<tr data-id="${f.id}" class="${f.off ? 'off' : ''}">
           <td class="mv"><button class="btn icon sm" data-act="up" ${i ? '' : 'disabled'} title="上移">▲</button><button class="btn icon sm" data-act="down" ${i < list.length - 1 ? '' : 'disabled'} title="下移">▼</button></td>
           <td class="f-name"><input data-f="name" value="${esc(f.name)}" placeholder="設備名稱" aria-label="設備名稱"></td>
+          <td class="f-area"><label><span>區域</span><input data-f="area" list="arealist" value="${esc(f.area)}" placeholder="例如 車前" aria-label="區域"></label></td>
           <td class="f-type"><select data-f="type" aria-label="類型">${Object.entries(TYPES).map(([k, t]) => `<option value="${k}" ${f.type === k ? 'selected' : ''}>${t.n}</option>`).join('')}</select></td>
           <td class="r f-lo"><label><span>下限</span><input data-f="lo" type="text" inputmode="decimal" value="${f.lo ?? ''}" placeholder="不限"></label></td>
           <td class="r f-hi"><label><span>上限</span><input data-f="hi" type="text" inputmode="decimal" value="${f.hi ?? ''}" placeholder="不限"></label></td>
@@ -985,6 +1071,7 @@
       const f = t.dataset.f; if (!f) return;
       const tr = t.closest('tr'), x = fridgeById(tr.dataset.id);
       if (f === 'name') x.name = t.value.trim();
+      else if (f === 'area') x.area = t.value.trim();
       else if (f === 'lo' || f === 'hi') { const p = parseTemp(t.value); t.classList.toggle('warn', !!p.bad); if (p.bad) return; x[f] = p.empty ? null : p.t; }
       else if (f === 'off') { x.off = t.checked; tr.classList.toggle('off', x.off); }
       else if (f === 'type') {
@@ -1027,7 +1114,7 @@
         const last = list[list.length - 1];
         const type = last ? last.type : 'chill';
         const ord = Math.max(0, ...db.fridges.map((x) => x.ord)) + 1;
-        const f = { id: uid(), name: '', type, lo: TYPES[type].lo, hi: TYPES[type].hi, off: false, deleted: false, ord, at: now() };
+        const f = { id: uid(), name: '', type, area: last ? last.area : '', lo: TYPES[type].lo, hi: TYPES[type].hi, off: false, deleted: false, ord, at: now() };
         db.fridges.push(f); save(); viewSettings(el);
         const inp = $(`tr[data-id="${f.id}"] [data-f=name]`, el); inp.scrollIntoView({ block: 'center' }); inp.focus();
       } else if (a === 'up' || a === 'down') {

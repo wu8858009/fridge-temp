@@ -197,6 +197,15 @@ textarea { width: 100%; resize: vertical; }
 .actbox { grid-column: 1 / -1; margin-top: 6px; text-align: left; font: inherit; font-size: 13px; color: var(--text-2); background: var(--surface); border: 1px dashed var(--line); border-radius: 8px; padding: 6px 10px; cursor: pointer; line-height: 1.5; }
 .actbox.open { color: var(--danger); border-color: var(--danger); font-weight: 700; }
 
+/* ---- 區域 ---- */
+.areah { display: flex; align-items: baseline; gap: 8px; font-size: 16px; margin: 4px 0 10px; color: var(--text-2); }
+.areah small { font-size: 12px; color: var(--muted); font-weight: 600; }
+.sh-std { display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 11.5px; color: #444; margin-bottom: 6px; }
+.sh-tbl.dense th, .sh-tbl.dense td { font-size: 10px; padding: 1px 2px; }
+.sh-tbl.dense td.t { min-width: 30px; }
+.sh-tbl.dense td.acts { min-width: 70px; }
+.ftable .f-area { width: 120px; }
+
 /* ---- 對話框 ---- */
 .dlg.wide { max-width: 560px; }
 .dlg { max-height: calc(100vh - 32px); overflow: auto; }
@@ -307,6 +316,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .sheet { box-shadow: none; padding: 0; max-width: none; border-radius: 0; overflow: visible; break-after: page; page-break-after: always; }
   .sheet:last-child { break-after: auto; page-break-after: auto; }
   .sh-tbl th, .sh-tbl td { -webkit-print-color-adjust: exact; print-color-adjust: exact; padding: 2px 3px; font-size: 11px; }
+  .sh-tbl.dense th, .sh-tbl.dense td { font-size: 10px; padding: 1px 2px; }
   body:not([data-view=month]) main > * { display: none; }
 }
 
@@ -353,6 +363,8 @@ tbody tr:last-child td { border-bottom: 0; }
   .ftable .f-name { grid-column: 1 / 3; min-width: 0; }
   .ftable .f-name input { font-weight: 700; }
   .ftable .f-del { grid-column: 3; grid-row: 1; }
+  .ftable .f-area { grid-column: 1 / 3; width: auto; }
+  .ftable .f-area input { width: 100%; }
   .ftable .f-type { grid-column: 1; width: auto; }
   .ftable .f-off { grid-column: 2; display: flex; align-items: center; }
   .ftable .mv { grid-column: 3; grid-row: 2 / span 2; width: auto; display: flex; flex-direction: column; gap: 4px; }

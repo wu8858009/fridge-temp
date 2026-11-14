@@ -9,12 +9,12 @@
 const TABLES = {
   fridges: {
     sheet: '設備',
-    head: ['ID', '名稱', '類型', '下限', '上限', '停用', '已刪除', '排序', '更新時間', '版本'],
-    text: [1, 2, 3],
+    head: ['ID', '名稱', '類型', '下限', '上限', '停用', '已刪除', '排序', '區域', '更新時間', '版本'],
+    text: [1, 2, 3, 9],
     key: (r) => r.id,
     valid: (r) => !!r.id,
-    toRow: (r, rev) => [r.id, str_(r.name), TYPE_N[r.type] || '其他', nn_(r.lo), nn_(r.hi), r.off ? '是' : '', r.deleted ? '是' : '', num_(r.ord), num_(r.at), rev],
-    fromRow: (a) => ({ id: str_(a[0]), name: str_(a[1]), type: TYPE_K[str_(a[2])] || 'other', lo: nul_(a[3]), hi: nul_(a[4]), off: yes_(a[5]), deleted: yes_(a[6]), ord: num_(a[7]), at: num_(a[8]) }),
+    toRow: (r, rev) => [r.id, str_(r.name), TYPE_N[r.type] || '其他', nn_(r.lo), nn_(r.hi), r.off ? '是' : '', r.deleted ? '是' : '', num_(r.ord), str_(r.area), num_(r.at), rev],
+    fromRow: (a) => ({ id: str_(a[0]), name: str_(a[1]), type: TYPE_K[str_(a[2])] || 'other', lo: nul_(a[3]), hi: nul_(a[4]), off: yes_(a[5]), deleted: yes_(a[6]), ord: num_(a[7]), area: str_(a[8]), at: num_(a[9]) }),
   },
   recs: {
     sheet: '溫度紀錄',
@@ -64,13 +64,24 @@ function sheet_(t) {
   }
   return sh;
 }
+// 依標題名稱讀取欄位：新版加了欄位（例如「區域」）時，舊試算表會自動轉成新欄位順序（t.migrate 標記要重寫）
 function read_(t) {
   const sh = sheet_(t), n = sh.getLastRow() - 1;
-  return n > 0 ? sh.getRange(2, 1, n, t.head.length).getValues().filter((a) => str_(a[0]) !== '') : [];
+  const w = Math.max(t.head.length, sh.getLastColumn());
+  const hdr = sh.getRange(1, 1, 1, w).getValues()[0].map(str_);
+  const same = t.head.every((h, i) => hdr[i] === h);
+  if (!same) t.migrate = true;
+  if (n <= 0) return [];
+  const raw = sh.getRange(2, 1, n, w).getValues().filter((a) => str_(a[0]) !== '');
+  if (same) return raw.map((a) => a.slice(0, t.head.length));
+  const idx = t.head.map((h) => hdr.indexOf(h));
+  return raw.map((a) => idx.map((j) => (j < 0 ? '' : a[j])));
 }
 function write_(t, rows) {
   const sh = sheet_(t), w = t.head.length, last = sh.getLastRow();
-  if (last > 1) sh.getRange(2, 1, last - 1, w).clearContent();
+  const wc = Math.max(w, sh.getLastColumn());
+  if (t.migrate) { sh.getRange(1, 1, 1, wc).clearContent(); sh.getRange(1, 1, 1, w).setValues([t.head]).setFontWeight('bold'); t.migrate = false; }
+  if (last > 1) sh.getRange(2, 1, last - 1, wc).clearContent();
   if (!rows.length) return;
   // 文字欄先設成純文字，避免 = + 開頭被當公式、日期被轉成日期格式
   t.text.forEach((c) => sh.getRange(2, c, rows.length, 1).setNumberFormat('@'));
@@ -159,6 +170,7 @@ function sync_(req) {
     const idx = {};
     rows.forEach((a, i) => { idx[t.key(t.fromRow(a))] = i; });
     data[name] = { rows: rows, idx: idx };
+    if (t.migrate) changed[name] = true;
   }
   // 設定先處理，紀錄列才能帶入最新的時段名稱
   const conf = conf_();
@@ -230,6 +242,8 @@ function onEdit(e) {
     if (!t) return;
     const r0 = Math.max(2, e.range.getRow()), r1 = e.range.getRow() + e.range.getNumRows() - 1;
     if (r1 < r0) return;
+    read_(t);
+    if (t.migrate) return; // 舊欄位順序：等 App 下次同步轉換後再處理
     const lock = LockService.getScriptLock();
     lock.waitLock(10000);
     try {
