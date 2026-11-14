@@ -1,7 +1,7 @@
 /* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.1.0';
+  const VERSION = '1.1.1';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具
@@ -219,7 +219,7 @@
     $('#tt').hidden = true;
     const el = $('#app');
     el.onclick = el.oninput = el.onchange = el.onkeydown = el.onfocusin = null;
-    if (cur.view !== v) window.scrollTo(0, 0);
+    if (cur.view !== v) el.scrollTop = 0;
     cur.view = v;
     document.body.dataset.view = v;
     if (v === 'month') viewMonth(el, validYm(h[1] || '') ? h[1] : today().slice(0, 7), h[2] || 'all');
@@ -929,9 +929,9 @@
     const a = document.activeElement;
     if ((a && $('#app').contains(a) && a.matches('input, textarea, select')) || $('.modal')) { pendingRefresh = true; return; }
     pendingRefresh = false;
-    const y = window.scrollY;
+    const box = $('#app'), y = box.scrollTop;
     route();
-    window.scrollTo(0, y);
+    box.scrollTop = y;
   }
   document.addEventListener('focusout', () => setTimeout(() => { if (pendingRefresh) refresh(); }, 80));
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { Cloud.tick(); updateDot(); } });
