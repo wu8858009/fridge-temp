@@ -1,7 +1,7 @@
 /* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.6.3';
+  const VERSION = '1.6.4';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具
@@ -877,14 +877,14 @@
       </header>
       <table class="sh-tbl">
         <thead>
-          <tr><th rowspan="2" class="c">日期</th><th rowspan="2" class="c">星期</th>${M.slots.map((s) => `<th colspan="2" class="c">${esc(s.name)}${s.time ? `<small> ${esc(s.time)}</small>` : ''}</th>`).join('')}<th rowspan="2" class="c sign">主管<br>確認</th></tr>
+          <tr><th rowspan="2" class="c">日期</th><th rowspan="2" class="c">星期</th>${M.slots.map((s) => `<th colspan="2" class="c">${esc(s.name)}${s.time ? `<small> ${esc(s.time)}</small>` : ''}</th>`).join('')}</tr>
           <tr>${M.slots.map(() => '<th class="c">溫度</th><th class="c">記錄人</th>').join('')}</tr>
         </thead>
         <tbody>${S.rows.map((r) => {
           const wd = pd(r.d).getDay();
           return `<tr class="${wd % 6 === 0 ? 'we' : ''}"><td class="c">${+r.d.slice(8)}</td><td class="c">${WD[wd]}</td>${r.cells.map((c) => c.e
             ? `<td class="c t${c.e.x ? ' x' : ''}">${t1(c.e.t)}</td><td class="c by">${esc(c.e.by)}${c.e.ts && c.e.ts.slice(0, 10) !== r.d ? '<small>補</small>' : ''}</td>`
-            : '<td class="c t"></td><td class="c by"></td>').join('')}<td></td></tr>`;
+            : '<td class="c t"></td><td class="c by"></td>').join('')}</tr>`;
         }).join('')}</tbody>
       </table>
     </article>`;
@@ -917,13 +917,13 @@
       </header>
       <table class="sh-tbl${dense}">
         <thead>
-          <tr><th rowspan="2" class="c">日期</th><th rowspan="2" class="c">星期</th>${G.Ss.map((S) => `<th colspan="${M.slots.length}" class="c">${esc(S.f.name)}</th>`).join('')}<th colspan="${M.slots.length}" class="c">記錄人</th><th rowspan="2" class="c sign">主管<br>確認</th></tr>
+          <tr><th rowspan="2" class="c">日期</th><th rowspan="2" class="c">星期</th>${G.Ss.map((S) => `<th colspan="${M.slots.length}" class="c">${esc(S.f.name)}</th>`).join('')}<th colspan="${M.slots.length}" class="c">記錄人</th></tr>
           <tr>${G.Ss.map(() => M.slots.map((s) => `<th class="c">${esc(s.name)}</th>`).join('')).join('')}${M.slots.map((s) => `<th class="c">${esc(s.name)}</th>`).join('')}</tr>
         </thead>
         <tbody>${G.rows.map((r, i) => {
           const wd = pd(r.d).getDay();
           return `<tr class="${wd % 6 === 0 ? 'we' : ''}"><td class="c">${+r.d.slice(8)}</td><td class="c">${WD[wd]}</td>${G.Ss.map((S) => S.rows[i].cells.map((c) => (c.e
-            ? `<td class="c t${c.e.x ? ' x' : ''}">${t1(c.e.t)}</td>` : '<td class="c t"></td>')).join('')).join('')}${r.by.map((b, j) => `<td class="c by">${esc(b)}${r.late[j] ? '<small>補</small>' : ''}</td>`).join('')}<td></td></tr>`;
+            ? `<td class="c t${c.e.x ? ' x' : ''}">${t1(c.e.t)}</td>` : '<td class="c t"></td>')).join('')).join('')}${r.by.map((b, j) => `<td class="c by">${esc(b)}${r.late[j] ? '<small>補</small>' : ''}</td>`).join('')}</tr>`;
         }).join('')}</tbody>
       </table>
     </article>`;
