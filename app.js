@@ -1,7 +1,7 @@
 /* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.4.0';
+  const VERSION = '1.4.1';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具
@@ -264,11 +264,26 @@
     }
     return n;
   }
+  // 下限、上限填反了（例如冷凍填成 下限 -18、上限 -25）也照「較低～較高」判斷
+  function bounds(f) {
+    let lo = f.lo, hi = f.hi;
+    if (lo != null && hi != null && lo > hi) [lo, hi] = [hi, lo];
+    return { lo, hi };
+  }
   function isBad(f, t) {
     if (t == null || !f) return false;
-    return (f.lo != null && t < f.lo) || (f.hi != null && t > f.hi);
+    const { lo, hi } = bounds(f);
+    return (lo != null && t < lo) || (hi != null && t > hi);
+  }
+  // 把填反的下限／上限對調存回去；回傳是否有改
+  function fixSwapped(f) {
+    if (f.lo == null || f.hi == null || f.lo <= f.hi) return false;
+    [f.lo, f.hi] = [f.hi, f.lo];
+    f.at = now();
+    return true;
   }
   function rangeText(f) {
+    f = bounds(f);
     if (f.lo != null && f.hi != null) return `${f.lo}～${f.hi}°C`;
     if (f.hi != null) return `${f.hi}°C 以下`;
     if (f.lo != null) return `${f.lo}°C 以上`;
@@ -916,6 +931,7 @@
   }
   const NS = 'http://www.w3.org/2000/svg';
   function drawLine(box, f, C, from) {
+    f = { ...f, ...bounds(f) };
     const W = Math.max(280, box.clientWidth), H = W < 520 ? 190 : 230;
     const m = { l: 40, r: 10, t: 12, b: 26 };
     const pw = W - m.l - m.r, ph = H - m.t - m.b;
@@ -1230,9 +1246,17 @@
       }
       const f = t.dataset.f; if (!f) return;
       const tr = t.closest('tr'), x = fridgeById(tr.dataset.id);
+      let swapped = false;
       if (f === 'name') x.name = t.value.trim();
       else if (f === 'area') x.area = t.value.trim();
-      else if (f === 'lo' || f === 'hi') { const p = parseTemp(t.value); t.classList.toggle('warn', !!p.bad); if (p.bad) return; x[f] = p.empty ? null : p.t; }
+      else if (f === 'lo' || f === 'hi') {
+        const p = parseTemp(t.value); t.classList.toggle('warn', !!p.bad); if (p.bad) return;
+        x[f] = p.empty ? null : p.t;
+        if (fixSwapped(x)) {
+          $('[data-f=lo]', tr).value = x.lo; $('[data-f=hi]', tr).value = x.hi;
+          swapped = true;
+        }
+      }
       else if (f === 'off') { x.off = t.checked; tr.classList.toggle('off', x.off); }
       else if (f === 'type') {
         x.type = t.value;
@@ -1240,7 +1264,11 @@
         if (x.type !== 'other') { x.lo = T.lo; x.hi = T.hi; $('[data-f=lo]', tr).value = x.lo ?? ''; $('[data-f=hi]', tr).value = x.hi ?? ''; }
       }
       x.at = now();
-      if (f === 'lo' || f === 'hi' || f === 'type') { const n = recheckRecs(x); if (n) toast(`已依新範圍重新判斷 ${n} 筆紀錄`); }
+      if (f === 'lo' || f === 'hi' || f === 'type') {
+        const n = recheckRecs(x);
+        const msg = [swapped ? '下限比上限高，已自動對調（下限填較低的溫度，例如冷凍 下限 -25、上限 -18）' : '', n ? `已依新範圍重新判斷 ${n} 筆紀錄` : ''].filter(Boolean).join('；');
+        if (msg) toast(msg, swapped ? 6000 : 2600);
+      }
       save();
     };
     el.onkeydown = (e) => { if (e.key === 'Enter' && e.target.id === 'cpw') { e.preventDefault(); $('[data-act=connect]', el).click(); } };
@@ -1416,6 +1444,8 @@
     }
     if (!db) { db = seed(); await flush(); }
     addLowerBounds();
+    const sw = db.fridges.filter((f) => !f.deleted && fixSwapped(f)).length;
+    if (sw) { save(); setTimeout(() => toast(`有 ${sw} 台設備的下限、上限填反了，已自動對調`, 5000), 900); }
     if (db.fridges.reduce((n, f) => n + recheckRecs(f), 0)) save();
     renderShop();
     route();
