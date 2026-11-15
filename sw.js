@@ -1,6 +1,6 @@
 // 有網路時一律抓最新版（避免 iPhone 主畫面卡舊版），離線時用快取
-const CACHE = 'fridgetemp-v13';
-const SHELL = ['./', 'index.html', 'styles.css?v=13', 'config.js?v=13', 'xlsx.js?v=13', 'app.js?v=13', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'vendor/html2canvas.min.js', 'vendor/jspdf.umd.min.js', 'vendor/qrcode.min.js', 'vendor/jsQR.min.js'];
+const CACHE = 'fridgetemp-v14';
+const SHELL = ['./', 'index.html', 'styles.css?v=14', 'config.js?v=14', 'xlsx.js?v=14', 'app.js?v=14', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'vendor/html2canvas.min.js', 'vendor/jspdf.umd.min.js', 'vendor/qrcode.min.js', 'vendor/jsQR.min.js'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
