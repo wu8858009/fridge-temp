@@ -651,3 +651,17 @@ body.kp-open .fab { display: none; }
   .me.who .who-n { flex: 1; }
   .teamopts { gap: 12px; }
 }
+
+/* ---- PDF 滿版：字級依 --pf 自動放大縮小，列高 --rh 撐滿 A4 ---- */
+.pdf-render .sheet.fit { width: 718px; height: auto; margin: 0; font-size: calc(var(--pf, 12) * 1px); display: flex; flex-direction: column; }
+.pdf-render .sheet.fit .sh-head h2 { font-size: 1.75em; margin-bottom: .4em; }
+.pdf-render .sheet.fit .sh-info { font-size: 1.1em; margin-bottom: .45em; }
+.pdf-render .sheet.fit .sh-std { font-size: .95em; margin-bottom: .4em; }
+.pdf-render .sheet.fit .sh-tbl th, .pdf-render .sheet.fit .sh-tbl td { font-size: 1em; padding: .12em .3em; height: auto; line-height: 1.25; }
+.pdf-render .sheet.fit .sh-tbl tbody td { height: calc(var(--rh, 0) * 1px); }
+.pdf-render .sheet.fit .sh-tbl td.t { min-width: 3em; }
+.pdf-render .sheet.fit .sh-tbl .sign { width: 3.6em; }
+.pdf-render .sheet.fit .sh-foot { font-size: 1em; margin-top: .6em; }
+.pdf-render .sheet.fit .sh-sum { margin-bottom: 1em; }
+.pdf-render .sheet.fit .sh-signs span { padding-bottom: 1.4em; }
+.pdf-render .sheet.fit .sh-note { font-size: .85em; margin-top: .7em; }

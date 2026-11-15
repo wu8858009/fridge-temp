@@ -1,7 +1,7 @@
 /* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.6.1';
+  const VERSION = '1.6.2';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具
@@ -1012,6 +1012,26 @@
     setTimeout(() => URL.revokeObjectURL(url), 120000);
   }
   // 每個頁面元素各自截圖成一頁 A4（內容寬 190mm ≈ 718px，與列印版面相同）
+  // 報表滿版：找出放得下 A4（718×1047）的最大字級，再把資料列拉高撐滿整頁
+  const PW = 718, PH = 1047;
+  function fitSheet(sh) {
+    sh.classList.add('fit');
+    const tbl = sh.querySelector('.sh-tbl'), rows = [...sh.querySelectorAll('.sh-tbl tbody tr')];
+    sh.style.setProperty('--rh', 0);
+    const fits = (pf) => { sh.style.setProperty('--pf', pf); return tbl.scrollWidth <= PW + 0.5 && sh.offsetHeight <= PH; };
+    let lo = 6, hi = 26;
+    if (!fits(lo)) hi = lo;
+    else for (let k = 0; k < 12; k++) { const mid = (lo + hi) / 2; if (fits(mid)) lo = mid; else hi = mid; }
+    let pf = Math.floor(lo * 100) / 100;
+    while (pf > 6 && !fits(pf)) pf -= 0.1;
+    const extra = PH - sh.offsetHeight;
+    if (extra > 2 && rows.length) {
+      let rh = Math.floor((rows[0].offsetHeight + extra / rows.length) * 10) / 10;
+      sh.style.setProperty('--rh', rh);
+      while (rh > 0 && sh.scrollHeight > PH) sh.style.setProperty('--rh', rh -= 0.5);
+    }
+    sh.style.height = PH + 'px';
+  }
   async function htmlToPdf(pages, name) {
     await loadJs('vendor/html2canvas.min.js');
     await loadJs('vendor/jspdf.umd.min.js');
@@ -1024,6 +1044,7 @@
       const pdf = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
       let i = 0;
       for (const sh of host.children) {
+        if (sh.classList.contains('sheet')) fitSheet(sh);
         const cv = await window.html2canvas(sh, { scale: 2, backgroundColor: '#ffffff', windowWidth: 800 });
         let w = cw, h = cv.height / cv.width * cw;
         if (h > chh) { w *= chh / h; h = chh; } // 太長就等比縮小放進一頁
@@ -1805,6 +1826,6 @@
     }
   }
   // 測試用
-  window.__fridge = { get db() { return db; }, flush, Cloud, connectCloud, demoData, monthData, xlsxSheets, buildXlsx: (M) => b64(XLSXW.build(xlsxSheets(M))), dayStats, parseTemp, VERSION };
+  window.__fridge = { get db() { return db; }, flush, Cloud, connectCloud, demoData, monthData, xlsxSheets, buildXlsx: (M) => b64(XLSXW.build(xlsxSheets(M))), dayStats, parseTemp, buildPdf, VERSION };
   start();
 })();
