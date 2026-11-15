@@ -1,7 +1,7 @@
 /* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.6.2';
+  const VERSION = '1.6.3';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具
@@ -887,11 +887,6 @@
             : '<td class="c t"></td><td class="c by"></td>').join('')}<td></td></tr>`;
         }).join('')}</tbody>
       </table>
-      <footer class="sh-foot">
-        <div class="sh-sum">本月記錄 ${S.done} 筆${S.due ? `（應記錄 ${S.due} 筆，完成 ${Math.round(Math.min(S.done, S.due) / S.due * 100)}%）` : ''}・異常 <b class="${S.bad ? 'xv' : ''}">${S.bad}</b> 次${S.done ? `・平均 ${deg(S.avg)}・最低 ${deg(S.mn)}・最高 ${deg(S.mx)}` : ''}</div>
-        <div class="sh-signs"><span>記錄人：</span><span>主管：</span><span>負責人：</span></div>
-        <div class="sh-note">紅字表示超出標準溫度。依食品良好衛生規範準則，冷藏應保持 7°C 以下、冷凍應保持 -18°C 以下。</div>
-      </footer>
     </article>`;
   }
   // 區域合併頁：同一區的設備放在同一張 A4（日期 × 設備 × 時段）
@@ -919,7 +914,6 @@
       <header class="sh-head">
         <h2>${esc(name)}${name ? ' ' : ''}冰箱溫度記錄表</h2>
         <div class="sh-info"><span>區域：<b>${esc(G.area)}</b>（${G.Ss.length} 台）</span><span><b>${y}</b> 年 <b>${+m}</b> 月</span></div>
-        <div class="sh-std">${G.Ss.map((S) => `<span><b>${esc(S.f.name)}</b>：${typeName(S.f)} ${esc(rangeText(S.f))}</span>`).join('')}</div>
       </header>
       <table class="sh-tbl${dense}">
         <thead>
@@ -932,11 +926,6 @@
             ? `<td class="c t${c.e.x ? ' x' : ''}">${t1(c.e.t)}</td>` : '<td class="c t"></td>')).join('')).join('')}${r.by.map((b, j) => `<td class="c by">${esc(b)}${r.late[j] ? '<small>補</small>' : ''}</td>`).join('')}<td></td></tr>`;
         }).join('')}</tbody>
       </table>
-      <footer class="sh-foot">
-        <div class="sh-sum">本月記錄 ${G.done} 筆${G.due ? `（應記錄 ${G.due} 筆，完成 ${Math.round(Math.min(G.done, G.due) / G.due * 100)}%）` : ''}・異常 <b class="${G.bad ? 'xv' : ''}">${G.bad}</b> 次</div>
-        <div class="sh-signs"><span>記錄人：</span><span>主管：</span><span>負責人：</span></div>
-        <div class="sh-note">紅字表示超出標準溫度。依食品良好衛生規範準則，冷藏應保持 7°C 以下、冷凍應保持 -18°C 以下。</div>
-      </footer>
     </article>`;
   }
   // 有設定區域、且不是只看單一設備時，每個區域印成一頁
