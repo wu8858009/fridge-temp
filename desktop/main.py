@@ -28,6 +28,7 @@ KEEP_BACKUPS = 30
 FILE_TYPES = {
     ".xlsx": "Excel 活頁簿 (*.xlsx)",
     ".json": "JSON 備份 (*.json)",
+    ".pdf": "PDF 檔 (*.pdf)",
 }
 
 _window = None
@@ -154,6 +155,14 @@ def _selftest(out_path):
         time.sleep(1.5)
         xl = list(Path(os.environ.get("FRIDGETEMP_EXPORT_DIR", "")).glob("*.xlsx")) if os.environ.get("FRIDGETEMP_EXPORT_DIR") else []
         result["xlsx"] = [str(p) for p in xl]
+        js("document.querySelector('[data-act=print]').click()")
+        pdfs = []
+        for _ in range(40):
+            time.sleep(0.5)
+            pdfs = list(Path(os.environ.get("FRIDGETEMP_EXPORT_DIR", "")).glob("*.pdf")) if os.environ.get("FRIDGETEMP_EXPORT_DIR") else []
+            if pdfs and pdfs[0].stat().st_size > 10000:
+                break
+        result["pdf"] = [[str(p), p.stat().st_size, p.read_bytes().count(b"/Type /Page\n")] for p in pdfs]
         js("location.hash = '#/chart'")
         time.sleep(0.8)
         result["chart_lines"] = js("document.querySelectorAll('.chart .line').length")
@@ -161,7 +170,7 @@ def _selftest(out_path):
         time.sleep(0.6)
         result["data_path_shown"] = js("document.querySelector('#dpath') && document.querySelector('#dpath').textContent")
         result["window"] = [_window.x, _window.y, _window.width, _window.height]
-        result["ok"] = bool(n and n > 0 and result["saved_today"] and result["dialog"] and result["sheets"] and result["chart_lines"])
+        result["ok"] = bool(n and n > 0 and result["saved_today"] and result["dialog"] and result["sheets"] and result["chart_lines"] and result["pdf"])
     except Exception as e:  # noqa: BLE001
         result["error"] = repr(e)
     Path(out_path).write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
