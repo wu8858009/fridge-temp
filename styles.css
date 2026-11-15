@@ -416,3 +416,9 @@ body.kp-open .dlg { max-height: calc(100vh - var(--kph, 290px) - 16px); max-heig
 @media print { #kp { display: none !important; } }
 input.kp-on { outline: 3px solid var(--brand); outline-offset: -1px; border-color: transparent; }
 input[readonly][data-kp] { cursor: pointer; -webkit-user-select: none; user-select: none; caret-color: transparent; }
+
+/* ---- 產生 PDF 用的隱藏版面（與列印樣式相同，A4 內容寬 718px） ---- */
+.pdf-render { position: fixed; left: -10000px; top: 0; width: 718px; background: #fff; }
+.pdf-render .sheet { box-shadow: none; padding: 0; max-width: none; border-radius: 0; overflow: visible; margin-bottom: 20px; }
+.pdf-render .sh-tbl th, .pdf-render .sh-tbl td { padding: 2px 3px; font-size: 11px; }
+.pdf-render .sh-tbl.dense th, .pdf-render .sh-tbl.dense td { font-size: 10px; padding: 1px 2px; }

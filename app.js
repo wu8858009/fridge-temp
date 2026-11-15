@@ -1,7 +1,7 @@
 /* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.3.1';
+  const VERSION = '1.3.2';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具
@@ -678,12 +678,70 @@
       const a = b.dataset.act;
       if (a === 'prev') go(addM(ym, -1), fid);
       else if (a === 'next') go(addM(ym, 1), fid);
-      else if (a === 'print') doPrint();
+      else if (a === 'print') doPrint(M, fid);
       else if (a === 'xlsx') exportXlsx(M, AM);
     };
     el.onchange = (e) => { if (e.target.id === 'ym' && validYm(e.target.value)) go(e.target.value, fid); };
   }
-  function doPrint() { window.print(); }
+
+  // 列印：電腦瀏覽器用 window.print()；手機（iPhone 主畫面 App 不支援列印）與桌面版改成產生 A4 PDF 檔
+  const IS_MOBILE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+  const loadedJs = {};
+  const loadJs = (src) => loadedJs[src] || (loadedJs[src] = new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = res;
+    s.onerror = () => { delete loadedJs[src]; rej(new Error('無法載入 PDF 元件，請確認網路後再試')); };
+    document.head.append(s);
+  }));
+  let pdfBusy = false;
+  async function doPrint(M, fid) {
+    if (!DESK && !IS_MOBILE) return window.print();
+    if (pdfBusy) return;
+    pdfBusy = true;
+    toast('正在產生 PDF…', 60000);
+    let file;
+    try { file = await buildPdf(M, fid); } catch (e) { toast('產生 PDF 失敗：' + (e && e.message || e), 5000); return; } finally { pdfBusy = false; }
+    toast('PDF 已產生', 1500);
+    if (DESK) return saveFile(new Uint8Array(await file.arrayBuffer()), file.name, 'application/pdf');
+    const canShare = (() => { try { return !!navigator.canShare && navigator.canShare({ files: [file] }); } catch (e) { return false; } })();
+    // 產生 PDF 需要一點時間，iOS 會認為已不是使用者點的，所以請使用者再點一次
+    const k = await choose(`PDF 已準備好（${file.name}）。${canShare ? '按「分享／列印」後，在分享選單選「列印」就能用印表機列印，也可以存到「檔案」或傳 LINE。' : ''}`,
+      canShare ? [['share', '分享／列印'], ['open', '開啟 PDF'], ['', '關閉']] : [['open', '開啟 PDF'], ['', '關閉']]);
+    const url = URL.createObjectURL(file);
+    if (k === 'share') {
+      try { await navigator.share({ files: [file], title: file.name }); } catch (e) { if (e.name !== 'AbortError') window.open(url, '_blank'); }
+    } else if (k === 'open') {
+      const w = window.open(url, '_blank');
+      if (!w) { const a = document.createElement('a'); a.href = url; a.download = file.name; document.body.append(a); a.click(); a.remove(); }
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 120000);
+  }
+  // 每張記錄表各自截圖成一頁 A4（內容寬 190mm ≈ 718px，與列印版面相同）
+  async function buildPdf(M, fid) {
+    await loadJs('vendor/html2canvas.min.js');
+    await loadJs('vendor/jspdf.umd.min.js');
+    const AM = areaMode(fid);
+    const pages = AM ? areaGroups(M).map((G) => areaSheetHtml(M, G)) : M.sheets.map((S) => sheetHtml(M, S));
+    const host = document.createElement('div');
+    host.className = 'pdf-render';
+    host.innerHTML = pages.join('');
+    document.body.append(host);
+    try {
+      const W = 210, H = 297, MG = 10, cw = W - MG * 2, chh = H - MG * 2;
+      const pdf = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+      let i = 0;
+      for (const sh of host.children) {
+        const cv = await window.html2canvas(sh, { scale: 2, backgroundColor: '#ffffff', windowWidth: 800 });
+        let w = cw, h = cv.height / cv.width * cw;
+        if (h > chh) { w *= chh / h; h = chh; } // 太長就等比縮小放進一頁
+        if (i++) pdf.addPage();
+        pdf.addImage(cv.toDataURL('image/jpeg', 0.92), 'JPEG', MG + (cw - w) / 2, MG, w, h);
+      }
+      const area = fid.startsWith('area:') ? '_' + fid.slice(5) : fridgeById(fid) ? '_' + fridgeById(fid).name : '';
+      const name = fname(`${db.shop ? db.shop + '_' : ''}冰箱溫度記錄表_${M.ym.replace('-', '')}${area}.pdf`);
+      return new File([pdf.output('blob')], name, { type: 'application/pdf' });
+    } finally { host.remove(); }
+  }
 
   // ------------------------------------------------------------------ 匯出 Excel
   function xlsxSheets(M, AM) {
