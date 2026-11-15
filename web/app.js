@@ -1,7 +1,7 @@
 /* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.3.2';
+  const VERSION = '1.4.0';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具

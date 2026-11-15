@@ -1,54 +1,62 @@
 :root {
   color-scheme: light;
-  --bg: #f3f6f7;
-  --surface: #fffefc;
-  --surface-2: #f0eee9;
-  --line: #e2dfd8;
-  --text: #1c1b19;
-  --text-2: #57554f;
-  --muted: #7b7870;
-  --brand: #0e7490;
+  /* 專業儀表板風：深藍頂列／導覽、淺灰藍底、白色資訊卡 */
+  --bg: #edf1f7;
+  --surface: #ffffff;
+  --surface-2: #f2f5fa;
+  --line: #dae2ec;
+  --text: #0f172a;
+  --text-2: #334155;
+  --muted: #64748b;
+  --brand: #1d4ed8;
   --brand-ink: #fff;
-  --brand-soft: #e0f2f6;
-  --series: #2a78d6;
-  --series-soft: #d6e6f8;
+  --brand-soft: #dde8fd;
+  --nav: #0b1a33;
+  --nav-2: #16305a;
+  --nav-text: #a9b8cf;
+  --series: #2563eb;
+  --series-soft: #dbe7fb;
   --up: #15803d;
-  --down: #b91c1c;
-  --danger: #b91c1c;
-  --has: #f2fafb;
-  --bad-soft: #fde8e8;
+  --down: #dc2626;
+  --danger: #dc2626;
+  --has: #f8fafd;
+  --bad-soft: #fde7e7;
   --warn: #b45309;
-  --warn-soft: #fef3c7;
-  --ok-soft: #dcfce7;
+  --warn-soft: #fdf1d3;
+  --ok-soft: #dcf5e4;
   --band: rgba(22, 163, 74, .10);
-  --shadow: 0 1px 2px rgba(0, 0, 0, .06), 0 2px 8px rgba(0, 0, 0, .04);
-  --r: 10px;
+  --shadow: 0 1px 2px rgba(15, 23, 42, .05), 0 4px 14px rgba(15, 23, 42, .06);
+  --r: 12px;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, "Roboto Mono", monospace;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #131312;
-    --surface: #1c1c1a;
-    --surface-2: #262623;
-    --line: #34332f;
-    --text: #f0efec;
-    --text-2: #c3c2b7;
-    --muted: #9a988f;
-    --brand: #22d3ee;
-    --brand-ink: #04232b;
-    --brand-soft: #123640;
-    --series: #3987e5;
-    --series-soft: #20344d;
+    --bg: #08101d;
+    --surface: #101b2d;
+    --surface-2: #172439;
+    --line: #23334b;
+    --text: #e3e9f2;
+    --text-2: #b4c0d2;
+    --muted: #8193ab;
+    --brand: #60a5fa;
+    --brand-ink: #06101f;
+    --brand-soft: #16294a;
+    --nav: #050c18;
+    --nav-2: #0c1a30;
+    --nav-text: #8fa1bb;
+    --series: #60a5fa;
+    --series-soft: #1b3150;
     --up: #4ade80;
     --down: #f87171;
     --danger: #f87171;
-    --has: #18262a;
-    --bad-soft: #3b1a1a;
+    --has: #122036;
+    --bad-soft: #3a1820;
     --warn: #fbbf24;
-    --warn-soft: #3a2e12;
-    --ok-soft: #14301f;
+    --warn-soft: #382c10;
+    --ok-soft: #11301f;
     --band: rgba(74, 222, 128, .10);
-    --shadow: none;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3);
   }
 }
 :root[data-theme="dark"] { color-scheme: dark; }
@@ -311,7 +319,84 @@ tbody tr:last-child td { border-bottom: 0; }
 .sh-signs span { flex: 1; border-bottom: 1px solid #333; padding-bottom: 18px; }
 .sh-note { margin-top: 10px; color: #666; font-size: 11px; }
 
-.toast { z-index: 80; }
+
+/* ============================================================ 專業儀表板風外觀 ============================================================ */
+/* 頂列：深藍漸層 */
+.top { background: linear-gradient(120deg, var(--nav), var(--nav-2)); border-bottom: 0; color: #fff; box-shadow: 0 2px 10px rgba(5, 12, 24, .25); }
+.brand { color: #fff; letter-spacing: .02em; }
+.brand img { box-shadow: 0 0 0 2px rgba(255, 255, 255, .18); }
+#nav a { color: var(--nav-text); }
+#nav a:hover { background: rgba(255, 255, 255, .08); color: #fff; }
+#nav a.on { background: rgba(96, 165, 250, .2); color: #fff; box-shadow: inset 0 -2px 0 #60a5fa; }
+.status { color: var(--nav-text); }
+.status.bad { color: #fca5a5; }
+.cloudst { background: rgba(255, 255, 255, .1); color: var(--nav-text); display: inline-flex; align-items: center; gap: 5px; }
+.cloudst::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.cloudst.ok { color: #4ade80; }
+.cloudst.bad { color: #fca5a5; }
+
+/* 按鈕／切換 */
+.btn { border-radius: 9px; }
+.btn.primary { background: linear-gradient(180deg, #2b62e8, #1d4ed8); border-color: #1a45c2; color: #fff; box-shadow: 0 1px 2px rgba(29, 78, 216, .3); }
+.seg { background: var(--surface-2); border: 1px solid var(--line); }
+.seg button.on { background: var(--brand); color: var(--brand-ink); box-shadow: 0 1px 3px rgba(29, 78, 216, .3); }
+
+/* KPI 儀表：大數字＋上方色條 */
+.kpis { gap: 12px; }
+.kpi { position: relative; overflow: hidden; padding: 12px 16px 10px; border-radius: var(--r); }
+.kpi::before { content: ''; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--line); }
+.kpi.main::before { background: var(--brand); }
+.kpi.warnk::before { background: #f59e0b; }
+.kpi.badk::before { background: var(--danger); }
+.kpi .l { letter-spacing: .08em; font-size: 11.5px; }
+.kpi .v { font-family: var(--mono); font-size: 30px; font-weight: 800; letter-spacing: -.02em; line-height: 1.25; }
+.kpi .v small { font-family: var(--mono); }
+
+/* 提示條 */
+.banner { border-left: 4px solid currentColor; border-radius: 8px; }
+
+/* 區域標題 */
+.areah { display: flex; align-items: center; gap: 10px; color: var(--text); font-size: 15px; letter-spacing: .04em; margin: 10px 0; }
+.areah::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+.areah small { background: var(--brand-soft); color: var(--brand); padding: 1px 9px; border-radius: 999px; }
+
+/* 設備卡 */
+.fcard { border-radius: var(--r); }
+.fhead { background: linear-gradient(90deg, var(--surface-2), var(--surface)); border-left-width: 5px; border-bottom: 1px solid var(--line); padding: 11px 14px; }
+.fcard.t-chill .fhead { border-left-color: #06b6d4; }
+.fcard.t-freeze .fhead { border-left-color: #3b82f6; }
+.ficon { width: 38px; height: 38px; flex: none; border-radius: 10px; display: grid; place-items: center; background: var(--surface); border: 1px solid var(--line); font-size: 20px; }
+.fname b { letter-spacing: .02em; }
+.srow.x { box-shadow: inset 4px 0 0 var(--danger); }
+.srow.has:not(.x) { box-shadow: inset 4px 0 0 #22c55e; }
+.slot small { font-family: var(--mono); }
+.tin input { font-family: var(--mono); font-size: 20px; font-weight: 800; border-radius: 9px; }
+.tin input::placeholder { font-weight: 500; color: var(--muted); opacity: .45; }
+.pill { border-radius: 6px; letter-spacing: .04em; padding: 3px 9px; display: inline-flex; align-items: center; gap: 5px; }
+.pill.ok::before, .pill.miss::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pill.bad { background: var(--danger); color: #fff; box-shadow: 0 0 0 3px var(--bad-soft); }
+
+/* 卡片標題前加色條 */
+.card { border-radius: var(--r); }
+.card-head h3 { display: flex; align-items: center; gap: 8px; }
+.card-head h3::before { content: ''; width: 4px; height: 16px; border-radius: 2px; background: var(--brand); }
+.cstats b { font-family: var(--mono); }
+th { letter-spacing: .04em; }
+
+/* 對話框 */
+.modal { background: rgba(5, 12, 24, .55); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
+.dlg { border-radius: 16px; border-top: 4px solid var(--brand); }
+
+/* 提示訊息與圖表浮動說明 */
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 80; max-width: calc(100% - 32px);
+  background: var(--nav); color: #fff; padding: 10px 18px; border-radius: 10px; font-size: 14px; font-weight: 600;
+  box-shadow: 0 8px 24px rgba(5, 12, 24, .35); border-left: 4px solid #60a5fa;
+}
+.tt {
+  position: fixed; z-index: 90; pointer-events: none; background: var(--nav); color: #e3e9f2; padding: 7px 10px; border-radius: 8px;
+  font-size: 12.5px; line-height: 1.5; box-shadow: 0 6px 18px rgba(5, 12, 24, .35); max-width: 260px;
+}
 
 /* ---- 列印：只印記錄表，每台設備一頁 A4 ---- */
 @media print {
@@ -342,10 +427,13 @@ tbody tr:last-child td { border-bottom: 0; }
 @media screen and (max-width: 719px) {
   .top { padding: 8px 16px; padding-top: max(8px, env(safe-area-inset-top)); }
   #nav {
-    position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; background: var(--surface); border-top: 1px solid var(--line);
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; background: var(--nav); border-top: 1px solid rgba(255, 255, 255, .08);
     padding: 4px 4px max(4px, env(safe-area-inset-bottom)); justify-content: space-around; gap: 0;
   }
   #nav a { flex-direction: column; gap: 0; padding: 4px 6px; font-size: 11px; flex: 1; position: relative; }
+  #nav a.on { background: transparent; box-shadow: none; color: #fff; }
+  #nav a.on::before { content: ''; position: absolute; top: -4px; left: 30%; right: 30%; height: 3px; border-radius: 0 0 3px 3px; background: #60a5fa; }
+  #nav a.on b { filter: drop-shadow(0 0 6px rgba(96, 165, 250, .7)); }
   #nav a b { font-size: 20px; line-height: 1.2; }
   #navdot { position: absolute; top: 4px; left: calc(50% + 10px); }
   main { padding: 12px 16px calc(84px + env(safe-area-inset-bottom)); }
@@ -361,7 +449,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .kpis { grid-template-columns: repeat(3, 1fr); gap: 8px; }
   .kpi { padding: 8px 10px; }
   .kpi .l { font-size: 11px; }
-  .kpi .v { font-size: 19px; }
+  .kpi .v { font-size: 24px; }
   .fridges { grid-template-columns: 1fr; }
   .srow { padding: 8px 12px; gap: 2px 8px; }
   .tin input { width: 76px; }
