@@ -1,7 +1,7 @@
 /* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.4.1';
+  const VERSION = '1.5.0';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具
@@ -347,6 +347,12 @@
   function renderShop() {
     $('#shop').textContent = db.shop || '冰箱溫度記錄表';
     document.title = (db.shop ? db.shop + ' · ' : '') + '冰箱溫度記錄表系統';
+    try { localStorage.setItem('fridgetemp-shop', db.shop || ''); } catch (e) { /* 無痕模式 */ }
+  }
+  // 啟動動畫：載入完成後淡出，至少顯示 1.6 秒讓動畫跑完
+  function hideSplash() {
+    const s = $('#splash'); if (!s) return;
+    setTimeout(() => { s.classList.add('out'); setTimeout(() => s.remove(), 700); }, Math.max(0, 1600 - performance.now()));
   }
   // 導覽列紅點：今天已到時間但還沒記錄，或有異常未處置
   function updateDot() {
@@ -1449,6 +1455,7 @@
     if (db.fridges.reduce((n, f) => n + recheckRecs(f), 0)) save();
     renderShop();
     route();
+    hideSplash();
     setStatus('');
     Cloud.start();
     if (!DESK && 'serviceWorker' in navigator && location.protocol.startsWith('http')) {
