@@ -1,7 +1,7 @@
 /* 冰箱溫度記錄表系統 — 每日溫度記錄、超溫處置、月報表、趨勢圖（PWA 與桌面版共用） */
 (() => {
   'use strict';
-  const VERSION = '1.5.0';
+  const VERSION = '1.6.0';
   const DESK = new URLSearchParams(location.search).has('desktop');
 
   // ------------------------------------------------------------------ 工具
@@ -159,6 +159,7 @@
   }
   async function flush() {
     clearTimeout(saveTimer); saveTimer = null;
+    if (db.me) db.meAct = lastAct;
     const text = JSON.stringify(db);
     try {
       if (DESK) { const r = await (await api()).save(text); if (r !== true) throw new Error(r); } else await IDB.set('db', text);
@@ -181,7 +182,7 @@
     other: { n: '其他', lo: null, hi: null },
   };
   const ACTIONS = ['調整溫控設定', '關緊冰箱門／檢查門封條', '減少開門次數', '食材移至其他冰箱', '報廢受影響食材', '除霜／清潔散熱口', '通知廠商維修', '剛補貨或開門頻繁，稍後複測'];
-  const blank = () => ({ ver: 1, shop: '', shopAt: 0, fridges: [], slots: [], slotsAt: 0, staff: [], staffAt: 0, recs: {}, createdAt: Date.now(), seedAt: 0 });
+  const blank = () => ({ ver: 1, shop: '', shopAt: 0, fridges: [], slots: [], slotsAt: 0, staff: [], staffAt: 0, team: { on: false, idle: 0, people: {} }, teamAt: 0, recs: {}, createdAt: Date.now(), seedAt: 0 });
   function seed() {
     const d = blank(), now = Date.now();
     d.seedAt = now; d.slotsAt = now;
@@ -231,7 +232,8 @@
       const c = d.cloud;
       d.cloud = { url: String(c.url || ''), pw: String(c.pw || ''), rev: num(c.rev), pushedAt: num(c.pushedAt), on: !!c.on, lastOk: num(c.lastOk), sheet: /^https:\/\/docs\.google\.com\//.test(c.sheet || '') ? String(c.sheet) : '' };
     } else delete d.cloud;
-    d.me = String(d.me || '');
+    d.team = normTeam(d.team); d.teamAt = num(d.teamAt);
+    d.me = String(d.me || ''); d.meOk = String(d.meOk || ''); d.meAct = num(d.meAct);
     return d;
   }
   function sortFridges(d) { d.fridges.sort((a, b) => a.ord - b.ord); }
@@ -326,12 +328,263 @@
     return { done, due, bad, open, total, missing };
   }
 
+  // ------------------------------------------------------------------ 員工 PIN 碼與權限分級
+  // db.team = { on, idle（閒置幾分鐘自動登出，0＝不登出）, people: { 姓名: { h: PIN 雜湊, r: 'admin' 主管 | 'staff' 員工 } } }
+  // 啟用後：記錄前要用 PIN 碼登入（防代簽）；員工只能記錄、修改自己今天／昨天的紀錄；設定頁只有主管能進
+  // db.me：這台裝置目前的記錄人；db.meOk：用 PIN 登入的人；db.meAct：最後操作時間（這三個都不同步）
+  const IDLE_OPTS = [0, 5, 15, 30, 60];
+  function normTeam(t) {
+    t = t && typeof t === 'object' ? t : {};
+    const people = {};
+    for (const [n, p] of Object.entries(t.people && typeof t.people === 'object' ? t.people : {})) {
+      if (!String(n).trim() || !p || typeof p !== 'object') continue;
+      people[String(n).trim()] = { h: /^[0-9a-f]{64}$/.test(p.h) ? p.h : '', r: p.r === 'admin' ? 'admin' : 'staff' };
+    }
+    return { on: !!t.on, idle: IDLE_OPTS.includes(+t.idle) ? +t.idle : 0, people };
+  }
+  const person = (n) => db.team.people[n] || { h: '', r: 'staff' };
+  const isAdminName = (n) => !!n && db.staff.includes(n) && person(n).r === 'admin' && !!person(n).h;
+  const teamOn = () => db.team.on && db.staff.some(isAdminName);
+  const loggedIn = () => !teamOn() || (!!db.me && db.meOk === db.me && db.staff.includes(db.me) && !!person(db.me).h);
+  const isAdmin = () => !teamOn() || (loggedIn() && person(db.me).r === 'admin');
+  // 回傳不能修改的原因（'' 表示可以；'login' 表示要先登入）
+  function lockReason(date, e) {
+    if (!teamOn()) return '';
+    if (!loggedIn()) return 'login';
+    if (isAdmin()) return '';
+    if (date < addD(today(), -1)) return '員工只能記錄今天和昨天，較早的紀錄請主管修改';
+    if (hasT(e) && e.by && e.by !== db.me) return `這筆是 ${e.by} 記錄的，只能由本人或主管修改`;
+    return '';
+  }
+  async function pinHash(name, pin) {
+    if (!(window.crypto && crypto.subtle)) throw new Error('這個瀏覽器不支援 PIN 碼加密，請改用 https 網址開啟');
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`fridgetemp|${name}|${pin}`));
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  const setTeam = () => { db.teamAt = now(); save(); };
+  function logout(msg) { db.me = ''; db.meOk = ''; save(); refresh(); if (msg) toast(msg, 4000); }
+
+  // PIN 數字鍵視窗；verify(pin) 回傳 true＝通過，字串＝錯誤訊息
+  function pinPad({ title, sub = '', verify }) {
+    return new Promise((res) => {
+      const m = document.createElement('div');
+      m.className = 'modal';
+      m.innerHTML = `<div class="dlg pindlg" role="dialog" aria-modal="true">
+        <h3>${esc(title)}</h3>${sub ? `<p class="muted">${esc(sub)}</p>` : ''}
+        <div class="pindots"></div><div class="pinmsg"></div>
+        <div class="pinkeys">${['1', '2', '3', '4', '5', '6', '7', '8', '9', 'back', '0', 'ok'].map((k) => `<button type="button" data-p="${k}" class="${k === 'ok' ? 'primary' : ''}">${k === 'back' ? '⌫' : k === 'ok' ? '確定' : k}</button>`).join('')}</div>
+        <button type="button" class="btn pincancel" data-p="cancel">取消</button>
+      </div>`;
+      let v = '', busy = false;
+      const dots = $('.pindots', m), msg = $('.pinmsg', m), dlg = $('.dlg', m);
+      const draw = () => { dots.innerHTML = Array.from({ length: Math.max(4, v.length) }, (_, i) => `<i class="${i < v.length ? 'on' : ''}"></i>`).join(''); };
+      const close = (r) => { m.remove(); document.removeEventListener('keydown', kd, true); res(r); };
+      const press = async (k) => {
+        if (busy) return;
+        if (k === 'cancel') return close(null);
+        if (k === 'back') v = v.slice(0, -1);
+        else if (k === 'ok') {
+          if (v.length < 4) { msg.textContent = '請輸入 4～6 位數字'; return; }
+          busy = true;
+          let r;
+          try { r = await verify(v); } catch (e) { r = e.message; }
+          busy = false;
+          if (r === true) return close(v);
+          msg.textContent = typeof r === 'string' ? r : 'PIN 碼錯誤';
+          dlg.classList.remove('shake'); void dlg.offsetWidth; dlg.classList.add('shake');
+          v = '';
+        } else if (v.length < 6) { v += k; msg.textContent = ''; }
+        draw();
+      };
+      m.addEventListener('click', (e) => { const b = e.target.closest('[data-p]'); if (b) press(b.dataset.p); else if (e.target === m) close(null); });
+      const kd = (e) => {
+        if (/^\d$/.test(e.key)) press(e.key); else if (e.key === 'Backspace') press('back'); else if (e.key === 'Enter') press('ok'); else if (e.key === 'Escape') press('cancel'); else return;
+        e.preventDefault(); e.stopPropagation();
+      };
+      document.addEventListener('keydown', kd, true);
+      draw(); document.body.append(m);
+    });
+  }
+  // 登入：點自己的名字 → 輸入 PIN 碼。錯 5 次要等 30 秒
+  let pinFails = 0, pinLockUntil = 0;
+  function loginDialog({ adminOnly = false } = {}) {
+    return new Promise((res) => {
+      KP.hide();
+      const names = db.staff.filter((n) => person(n).h && (!adminOnly || isAdminName(n)));
+      const noPin = db.staff.filter((n) => !person(n).h);
+      const m = document.createElement('div');
+      m.className = 'modal';
+      m.innerHTML = `<div class="dlg" role="dialog" aria-modal="true">
+        <h3>${adminOnly ? '🔒 主管登入' : '👤 誰在記錄？'}</h3>
+        <p class="muted small">${adminOnly ? '請主管點自己的名字並輸入 PIN 碼。' : '點自己的名字，再輸入 PIN 碼登入。'}</p>
+        <div class="whogrid">${names.map((n) => `<button type="button" class="who-b" data-n="${esc(n)}"><b>${esc([...n][0])}</b><span>${esc(n)}</span>${isAdminName(n) ? '<small>主管</small>' : ''}</button>`).join('') || '<p class="muted">沒有可以登入的人</p>'}</div>
+        ${!adminOnly && noPin.length ? `<p class="muted small">還沒設定 PIN 碼：${noPin.map(esc).join('、')}（請主管到「設定」設定）</p>` : ''}
+        <div class="btns"><button type="button" class="btn" data-n="">取消</button></div></div>`;
+      m.onclick = async (e) => {
+        const b = e.target.closest('[data-n]');
+        if (!b && e.target !== m) return;
+        m.remove();
+        const n = b ? b.dataset.n : '';
+        if (!n) return res(false);
+        const ok = await pinPad({
+          title: `${n}，請輸入 PIN 碼`,
+          verify: async (pin) => {
+            if (Date.now() < pinLockUntil) return `錯誤太多次，請 ${Math.ceil((pinLockUntil - Date.now()) / 1000)} 秒後再試`;
+            if (await pinHash(n, pin) === person(n).h) { pinFails = 0; return true; }
+            if (++pinFails >= 5) { pinFails = 0; pinLockUntil = Date.now() + 30000; return '錯誤 5 次，請 30 秒後再試'; }
+            return `PIN 碼錯誤（還可以再試 ${5 - pinFails} 次）`;
+          },
+        });
+        if (!ok) return res(false);
+        db.me = n; db.meOk = n; lastAct = Date.now(); save();
+        toast(`${n} 已登入${isAdminName(n) ? '（主管）' : ''}`);
+        refresh(); res(true);
+      };
+      document.body.append(m);
+    });
+  }
+  async function setPinDialog(n) {
+    const p1 = await pinPad({ title: `設定「${n}」的 PIN 碼`, sub: '輸入 4～6 位數字，登入時使用', verify: async () => true });
+    if (!p1) return false;
+    const p2 = await pinPad({ title: '再輸入一次確認', verify: async (p) => p === p1 || '兩次輸入不一樣，請再輸入一次' });
+    if (!p2) return false;
+    db.team.people[n] = { ...person(n), h: await pinHash(n, p1) };
+    setTeam();
+    return true;
+  }
+  // 閒置自動登出
+  let lastAct = Date.now();
+  function checkIdle() {
+    if (!db || !teamOn() || !db.team.idle || !db.meOk) return false;
+    if (Date.now() - lastAct <= db.team.idle * 60000) return false;
+    logout(`閒置超過 ${db.team.idle} 分鐘，已自動登出`);
+    return true;
+  }
+  ['pointerdown', 'keydown'].forEach((ev) => document.addEventListener(ev, () => { checkIdle(); lastAct = Date.now(); }, true));
+  setInterval(checkIdle, 20000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkIdle(); });
+
+  // ------------------------------------------------------------------ 冰箱 QR Code：掃描後直接打開那台冰箱的記錄
+  const PUBLIC_URL = window.FRIDGE_APP_URL || 'https://wu8858009.github.io/fridge-temp/';
+  const appUrl = () => (!DESK && location.protocol === 'https:' ? location.origin + location.pathname.replace(/index\.html$/, '') : PUBLIC_URL);
+  const qrUrl = (fid) => `${appUrl()}#/q/${fid}`;
+  const qrFid = (s) => { const m = /#\/q\/([\w-]+)/.exec(String(s)); return m ? m[1] : ''; };
+  let pendingFid = '';
+  function openFridge(fid) {
+    const d = today();
+    if (cur.view !== 'day' || cur.date !== d) { pendingFid = fid; location.hash = '#/day/' + d; return; }
+    focusFridge(fid);
+  }
+  function focusFridge(fid) {
+    const f = fridgeById(fid);
+    const card = $(`.fcard[data-fid="${fid}"]`);
+    if (!f || !card) return toast('找不到這台設備（可能已停用或刪除）', 3500);
+    card.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash');
+    if (teamOn() && !loggedIn()) { loginDialog().then((ok) => ok && setTimeout(() => focusFridge(fid), 120)); return; }
+    // 打開第一個還沒記錄的時段（先找已經到時間的）
+    const rows = $$('.srow', card).filter((r) => !r.classList.contains('has'));
+    const r = rows.find((x) => $('.pill.miss', x)) || rows[0];
+    const inp = r && $('[data-t]:not([data-lock])', r);
+    if (!inp) return toast(`${f.name}：今天的時段都記錄好了`);
+    setTimeout(() => { if (TOUCH) KP.show(inp); else inp.focus(); }, 400);
+  }
+  const canScan = () => !DESK && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  async function scanDialog() {
+    if (!canScan()) return toast('這台裝置不能用相機掃描');
+    try { await loadJs('vendor/jsQR.min.js'); } catch (e) { return toast(e.message); }
+    KP.hide();
+    const m = document.createElement('div');
+    m.className = 'modal';
+    m.innerHTML = `<div class="dlg scandlg" role="dialog" aria-modal="true"><h3>📷 掃描冰箱 QR Code</h3>
+      <div class="scanbox"><video playsinline muted autoplay></video><i class="scanframe"></i></div>
+      <p class="muted" id="scanmsg">把冰箱上的 QR Code 對準框框</p>
+      <div class="btns"><button type="button" class="btn" data-k="x">取消</button></div></div>`;
+    document.body.append(m);
+    const video = $('video', m), cv = document.createElement('canvas'), cx = cv.getContext('2d', { willReadFrequently: true });
+    let stream = null, raf = 0, done = false;
+    const stop = () => { done = true; cancelAnimationFrame(raf); if (stream) stream.getTracks().forEach((t) => t.stop()); m.remove(); };
+    m.onclick = (e) => { if (e.target.closest('[data-k=x]') || e.target === m) stop(); };
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    } catch (e) {
+      stop();
+      return toast(e.name === 'NotAllowedError' ? '沒有相機權限：請到手機「設定」允許這個 App 使用相機' : '無法開啟相機：' + e.message, 5000);
+    }
+    if (done) { stream.getTracks().forEach((t) => t.stop()); return; }
+    video.srcObject = stream;
+    video.play().catch(() => {});
+    const tick = () => {
+      if (done) return;
+      if (video.readyState >= 2 && video.videoWidth) {
+        const w = 480, h = Math.round(video.videoHeight / video.videoWidth * w);
+        cv.width = w; cv.height = h;
+        cx.drawImage(video, 0, 0, w, h);
+        const r = window.jsQR(cx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: 'dontInvert' });
+        if (r && r.data) {
+          const fid = qrFid(r.data), f = fridgeById(fid);
+          if (f && !f.deleted) { stop(); if (navigator.vibrate) navigator.vibrate(60); toast(`📷 ${f.name}`); openFridge(fid); return; }
+          $('#scanmsg', m).textContent = '這不是這家店的冰箱 QR Code';
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+  }
+
+  // QR Code 標籤頁（列印後貼在冰箱上）
+  const qrv = { per: 8 };
+  function qrSvg(text) {
+    const q = window.qrcode(0, 'M');
+    q.addData(text); q.make();
+    return q.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+  }
+  function qrLabel(f) {
+    return `<div class="qrl"><div class="qrl-top">${esc(db.shop || '冰箱溫度記錄表')}</div>
+      <div class="qrl-body"><div class="qrl-info"><b>${esc(f.name || '未命名')}</b>
+        <span>${f.area ? `📍 ${esc(f.area)}・` : ''}${typeName(f)}</span><span>標準 ${esc(rangeText(f))}</span>
+        <small>用 App「📷 掃描冰箱」或手機相機掃描，直接記錄溫度</small></div>
+        <div class="qrl-qr">${qrSvg(qrUrl(f.id))}</div></div></div>`;
+  }
+  function qrPagesHtml(per) {
+    const fs = liveFridges().filter((f) => !f.off);
+    const list = hasAreas(fs) ? byArea(fs).flatMap(([, l]) => l) : fs;
+    const pages = [];
+    for (let i = 0; i < list.length; i += per) pages.push(`<article class="qrpage p${per}">${list.slice(i, i + per).map(qrLabel).join('')}</article>`);
+    return pages;
+  }
+  async function viewQr(el) {
+    el.innerHTML = '<p class="empty">載入中…</p>';
+    try { await loadJs('vendor/qrcode.min.js'); } catch (e) { el.innerHTML = `<p class="empty">${esc(e.message)}</p>`; return; }
+    if (cur.view !== 'qr') return;
+    const pages = qrPagesHtml(qrv.per);
+    el.innerHTML = `
+      <div class="page-head no-print">
+        <button class="btn" data-act="back">◀ 回設定</button><h2>冰箱 QR Code 標籤</h2><div class="sp"></div>
+        <button class="btn primary" data-act="print" ${pages.length ? '' : 'disabled'}>🖨 列印 / 存 PDF</button>
+      </div>
+      <div class="filters no-print"><div class="seg">${[[8, '每頁 8 張（小）'], [4, '每頁 4 張（大）']].map(([k, t]) => `<button class="${qrv.per === k ? 'on' : ''}" data-per="${k}">${t}</button>`).join('')}</div></div>
+      <p class="hint no-print">印出來沿虛線剪下，貼在每台冰箱門上。掃描後會直接打開那台冰箱今天的記錄；${teamOn() ? '還沒登入會先要求輸入 PIN 碼。' : '建議用 App 裡的「📷 掃描冰箱」，資料才會記在同一個 App 裡。'}停用的設備不會印出。</p>
+      ${pages.length ? `<div class="qrpages">${pages.join('')}</div>` : '<p class="empty">沒有可以列印的設備。</p>'}`;
+    el.onclick = (e) => {
+      const b = e.target.closest('[data-act],[data-per]'); if (!b) return;
+      if (b.dataset.per) { qrv.per = +b.dataset.per; viewQr(el); return; }
+      if (b.dataset.act === 'back') location.hash = '#/settings';
+      else if (b.dataset.act === 'print') {
+        if (!DESK && !IS_MOBILE) return window.print();
+        deliverPdf(() => htmlToPdf(qrPagesHtml(qrv.per), fname(`${db.shop ? db.shop + '_' : ''}冰箱QRCode標籤.pdf`)));
+      }
+    };
+  }
+
   // ------------------------------------------------------------------ 路由
   const cur = { view: '', date: today() };
   function route() {
     const h = location.hash.replace(/^#\/?/, '').split('/');
-    const v = ['day', 'month', 'chart', 'settings'].includes(h[0]) ? h[0] : 'day';
-    $$('#nav a').forEach((a) => a.classList.toggle('on', a.dataset.v === v));
+    // 掃 QR Code 開進來（#/q/設備ID）：換成今天的每日記錄，再打開那台冰箱
+    if (h[0] === 'q') { pendingFid = h[1] || ''; history.replaceState(null, '', '#/day/' + today()); return route(); }
+    const v = ['day', 'month', 'chart', 'settings', 'qr'].includes(h[0]) ? h[0] : 'day';
+    $$('#nav a').forEach((a) => a.classList.toggle('on', a.dataset.v === (v === 'qr' ? 'settings' : v)));
     $('#tt').hidden = true;
     const el = $('#app');
     el.onclick = el.oninput = el.onchange = el.onkeydown = el.onfocusin = null;
@@ -341,8 +594,10 @@
     if (v === 'month') viewMonth(el, validYm(h[1] || '') ? h[1] : today().slice(0, 7), h[2] || 'all');
     else if (v === 'chart') viewChart(el);
     else if (v === 'settings') viewSettings(el);
+    else if (v === 'qr') viewQr(el);
     else viewDay(el, validYmd(h[1] || '') ? h[1] : today());
     updateDot();
+    if (v === 'day' && pendingFid) { const f = pendingFid; pendingFid = ''; setTimeout(() => focusFridge(f), 80); }
   }
   function renderShop() {
     $('#shop').textContent = db.shop || '冰箱溫度記錄表';
@@ -366,6 +621,12 @@
 
   // ------------------------------------------------------------------ 每日記錄
   const kpi = (l, v, s = '', cls = '') => `<div class="kpi ${cls}"><div class="l">${l}</div><div class="v">${v}</div>${s ? `<div class="s">${s}</div>` : ''}</div>`;
+  // 啟用 PIN 碼時，記錄人改成「登入／切換／登出」
+  function whoBox() {
+    const ok = loggedIn();
+    return `<div class="me who${ok ? '' : ' need'}"><span class="who-n">👤 ${ok ? `<b>${esc(db.me)}</b>${isAdminName(db.me) ? '<small class="role">主管</small>' : '<small class="role staff">員工</small>'}` : '<b>尚未登入</b>'}</span>
+      <button class="btn${ok ? '' : ' primary'}" data-act="login">${ok ? '切換' : '🔑 登入'}</button>${ok ? '<button class="btn" data-act="logout">登出</button>' : ''}</div>`;
+  }
   function staffOptions() {
     const names = [...new Set([...db.staff, ...(db.me ? [db.me] : [])])];
     return names.map((n) => `<option value="${esc(n)}">`).join('');
@@ -384,8 +645,8 @@
           <button class="btn icon" data-act="next" title="後一天" ${isToday ? 'disabled' : ''}>▶</button>
           ${isToday ? '' : '<button class="btn" data-act="today">回今天</button>'}
         </div>
-        <label class="me${db.me ? '' : ' need'}">記錄人<input id="me" list="stafflist" value="${esc(db.me)}" placeholder="選擇或輸入姓名" autocomplete="off"></label>
-        <datalist id="stafflist">${staffOptions()}</datalist>
+        ${teamOn() ? whoBox() : `<label class="me${db.me ? '' : ' need'}">記錄人<input id="me" list="stafflist" value="${esc(db.me)}" placeholder="選擇或輸入姓名" autocomplete="off"></label>
+        <datalist id="stafflist">${staffOptions()}</datalist>`}
       </div>
       <div id="banner"></div>
       <div class="kpis" id="daykpi"></div>
@@ -399,12 +660,19 @@
           ${ss.map((s) => slotRow(date, f, s)).join('')}
         </section>`).join('')}
       </div>`).join('')}`}
-      <p class="hint">輸入溫度會自動儲存並記下記錄人與時間。冷凍溫度記得按「±」或直接打負號（例如 -18）。超出標準會要求填寫異常處置。</p>`;
+      <p class="hint">輸入溫度會自動儲存並記下記錄人與時間。冷凍溫度記得按「±」或直接打負號（例如 -18）。超出標準會要求填寫異常處置。${canScan() && fs.length ? '<br>冰箱貼上 QR Code（到「⚙️ 設定」列印）後，按右下角「📷 掃描冰箱」就能直接跳到那台。' : ''}</p>
+      ${canScan() && fs.length ? '<button class="fab no-print" data-act="scan">📷 掃描冰箱</button>' : ''}`;
     const go = (s) => { location.hash = '#/day/' + s; };
     renderBanner(); renderDayKpi();
     el.onclick = (e) => {
+      const lk = e.target.closest('[data-lock]') || (e.target.closest('[data-act=sign]') && $('[data-lock]', e.target.closest('.srow')));
+      if (lk) { const r = lk.dataset.lock; if (r === 'login') loginDialog(); else toast(r, 3500); return; }
       const b = e.target.closest('[data-act]'); if (!b) return;
       const a = b.dataset.act;
+      if (a === 'login') { loginDialog(); return; }
+      if (a === 'logout') { logout('已登出'); return; }
+      if (a === 'scan') { scanDialog(); return; }
+      if (a === 'act' && !loggedIn()) { loginDialog(); return; }
       if (a === 'prev') go(addD(date, -1));
       else if (a === 'next') { if (!isToday) go(addD(date, 1)); }
       else if (a === 'today') go(today());
@@ -426,7 +694,7 @@
     el.oninput = (e) => {
       const t = e.target;
       if (t.matches('[data-t]')) commitTemp(t, false);
-      else if (t.id === 'me') { db.me = t.value.trim(); t.closest('.me').classList.toggle('need', !db.me); save(); }
+      else if (t.id === 'me') { db.me = t.value.trim(); db.meOk = ''; t.closest('.me').classList.toggle('need', !db.me); save(); }
     };
     el.onchange = (e) => {
       const t = e.target;
@@ -450,10 +718,11 @@
     const st = !has ? (dueSlot(s, date) ? '<span class="pill miss">未記錄</span>' : '<span class="pill">—</span>')
       : e.x ? `<span class="pill bad">異常</span>` : '<span class="pill ok">正常</span>';
     const meta = has ? `${esc(e.by || '未填記錄人')}・${esc(tsText(e.ts, date))}` : '';
+    const lock = lockReason(date, e);
     const act = has && e.x ? `<button class="actbox${e.act.trim() ? '' : ' open'}" data-act="act">${e.act.trim() ? `處置：${esc(e.act)}${e.rt != null ? `<br>複測 ${deg(e.rt)}${isBad(f, e.rt) ? '（仍異常）' : ''}` : ''}` : '⚠ 尚未填寫異常處置，點這裡填寫'}</button>` : '';
-    return `<div class="srow${has ? ' has' : ''}${has && e.x ? ' x' : ''}" data-sid="${s.id}">
+    return `<div class="srow${has ? ' has' : ''}${has && e.x ? ' x' : ''}${lock ? ' locked' : ''}" data-sid="${s.id}">
       <div class="slot"><b>${esc(s.name)}</b><small>${esc(s.time || '')}</small></div>
-      <div class="tin"><button class="btn icon sign" data-act="sign" tabindex="-1" title="正負號">±</button><input data-t type="text" inputmode="${IM}" data-kp${RO} autocomplete="off" value="${has ? t1(e.t) : ''}" placeholder="${f.type === 'freeze' ? '-18' : f.type === 'hot' ? '65' : '4'}" aria-label="${esc(f.name)} ${esc(s.name)} 溫度"><span class="unit">°C</span></div>
+      <div class="tin"><button class="btn icon sign" data-act="sign" tabindex="-1" title="正負號">±</button><input data-t type="text" inputmode="${IM}" ${lock ? `readonly data-lock="${esc(lock)}"` : `data-kp${RO}`} autocomplete="off" value="${has ? t1(e.t) : ''}" placeholder="${f.type === 'freeze' ? '-18' : f.type === 'hot' ? '65' : '4'}" aria-label="${esc(f.name)} ${esc(s.name)} 溫度"><span class="unit">°C</span></div>
       <div class="st">${st}</div>
       <div class="meta">${meta}</div>
       ${act}
@@ -476,6 +745,7 @@
     const row = inp.closest('.srow'), card = row.closest('.fcard');
     const date = cur.date, fid = card.dataset.fid, sid = row.dataset.sid;
     const f = fridgeById(fid);
+    if (lockReason(date, recOf(date, fid, sid))) return;
     const p = parseTemp(inp.value);
     inp.classList.toggle('warn', !!p.bad);
     if (p.bad) { if (final) toast('溫度格式不對，例如 4、-18、3.5'); return; }
@@ -715,13 +985,17 @@
     document.head.append(s);
   }));
   let pdfBusy = false;
-  async function doPrint(M, fid) {
+  function doPrint(M, fid) {
     if (!DESK && !IS_MOBILE) return window.print();
+    deliverPdf(() => buildPdf(M, fid));
+  }
+  // 產生 PDF 後：桌面版另存新檔；手機用分享選單（列印、存檔、傳 LINE）
+  async function deliverPdf(build) {
     if (pdfBusy) return;
     pdfBusy = true;
     toast('正在產生 PDF…', 60000);
     let file;
-    try { file = await buildPdf(M, fid); } catch (e) { toast('產生 PDF 失敗：' + (e && e.message || e), 5000); return; } finally { pdfBusy = false; }
+    try { file = await build(); } catch (e) { toast('產生 PDF 失敗：' + (e && e.message || e), 5000); return; } finally { pdfBusy = false; }
     toast('PDF 已產生', 1500);
     if (DESK) return saveFile(new Uint8Array(await file.arrayBuffer()), file.name, 'application/pdf');
     const canShare = (() => { try { return !!navigator.canShare && navigator.canShare({ files: [file] }); } catch (e) { return false; } })();
@@ -737,12 +1011,10 @@
     }
     setTimeout(() => URL.revokeObjectURL(url), 120000);
   }
-  // 每張記錄表各自截圖成一頁 A4（內容寬 190mm ≈ 718px，與列印版面相同）
-  async function buildPdf(M, fid) {
+  // 每個頁面元素各自截圖成一頁 A4（內容寬 190mm ≈ 718px，與列印版面相同）
+  async function htmlToPdf(pages, name) {
     await loadJs('vendor/html2canvas.min.js');
     await loadJs('vendor/jspdf.umd.min.js');
-    const AM = areaMode(fid);
-    const pages = AM ? areaGroups(M).map((G) => areaSheetHtml(M, G)) : M.sheets.map((S) => sheetHtml(M, S));
     const host = document.createElement('div');
     host.className = 'pdf-render';
     host.innerHTML = pages.join('');
@@ -758,10 +1030,14 @@
         if (i++) pdf.addPage();
         pdf.addImage(cv.toDataURL('image/jpeg', 0.92), 'JPEG', MG + (cw - w) / 2, MG, w, h);
       }
-      const area = fid.startsWith('area:') ? '_' + fid.slice(5) : fridgeById(fid) ? '_' + fridgeById(fid).name : '';
-      const name = fname(`${db.shop ? db.shop + '_' : ''}冰箱溫度記錄表_${M.ym.replace('-', '')}${area}.pdf`);
       return new File([pdf.output('blob')], name, { type: 'application/pdf' });
     } finally { host.remove(); }
+  }
+  function buildPdf(M, fid) {
+    const AM = areaMode(fid);
+    const pages = AM ? areaGroups(M).map((G) => areaSheetHtml(M, G)) : M.sheets.map((S) => sheetHtml(M, S));
+    const area = fid.startsWith('area:') ? '_' + fid.slice(5) : fridgeById(fid) ? '_' + fridgeById(fid).name : '';
+    return htmlToPdf(pages, fname(`${db.shop ? db.shop + '_' : ''}冰箱溫度記錄表_${M.ym.replace('-', '')}${area}.pdf`));
   }
 
   // ------------------------------------------------------------------ 匯出 Excel
@@ -1026,6 +1302,7 @@
       if (db.shopAt > since) out.conf.shop = { v: db.shop, at: db.shopAt };
       if (db.slotsAt > since) out.conf.slots = { v: db.slots, at: db.slotsAt };
       if (db.staffAt > since) out.conf.staff = { v: db.staff, at: db.staffAt };
+      if (db.teamAt > since) out.conf.team = { v: db.team, at: db.teamAt };
       return out;
     },
     pending() {
@@ -1053,6 +1330,7 @@
       if (c.shop && num(c.shop.at) > db.shopAt) { db.shop = String(c.shop.v || ''); db.shopAt = num(c.shop.at); renderShop(); ch = true; }
       if (c.slots && num(c.slots.at) > db.slotsAt) { db.slots = normSlots(c.slots.v); db.slotsAt = num(c.slots.at); ch = true; }
       if (c.staff && num(c.staff.at) > db.staffAt) { db.staff = (c.staff.v || []).map(String).filter(Boolean); db.staffAt = num(c.staff.at); ch = true; }
+      if (c.team && num(c.team.at) > db.teamAt) { db.team = normTeam(c.team.v); db.teamAt = num(c.team.at); ch = true; }
       return ch;
     },
     schedule(ms = 1500) { if (!this.on()) return; clearTimeout(this.timer); this.timer = setTimeout(() => this.sync(), ms); },
@@ -1130,7 +1408,7 @@
     });
   }
   const anyRecs = () => Object.values(db.recs).some((v) => Object.values(v).some((ss) => Object.values(ss).some(hasT)));
-  const isPristine = () => !anyRecs() && db.fridges.every((f) => f.at <= db.seedAt) && db.slotsAt <= db.seedAt && !db.staffAt && !db.shopAt;
+  const isPristine = () => !anyRecs() && db.fridges.every((f) => f.at <= db.seedAt) && db.slotsAt <= db.seedAt && !db.staffAt && !db.teamAt && !db.shopAt;
   async function connectCloud(url, pw) {
     url = url.trim();
     if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url) && !/^http:\/\/127\.0\.0\.1:\d+\/?/.test(url)) throw new Error('網址格式不對，應該像 https://script.google.com/macros/s/…/exec');
@@ -1163,19 +1441,47 @@
   }
 
   // ------------------------------------------------------------------ 設定
+  function teamCard() {
+    const T = db.team;
+    return `<section class="card" id="teamcard">
+        <div class="card-head"><h3>👥 員工 PIN 碼與權限</h3></div>
+        <p class="hint pad">啟用後，記錄前要點自己的名字並輸入 PIN 碼登入，紀錄會記下是誰量的，防止代簽。<br>「員工」只能記錄，以及修改自己今天和昨天的溫度；「主管」可以修改所有紀錄和進入設定。至少要有一位設好 PIN 碼的主管才能啟用。</p>
+        ${db.staff.length ? `<div class="tbl-wrap"><table class="ttable"><thead><tr><th>姓名</th><th>權限</th><th>PIN 碼</th></tr></thead><tbody>
+          ${db.staff.map((n) => { const P = person(n); return `<tr data-n="${esc(n)}"><td><b>${esc(n)}</b>${db.meOk === n ? ' <small class="muted">（目前登入）</small>' : ''}</td>
+            <td><select data-role aria-label="${esc(n)} 的權限"><option value="staff" ${P.r === 'admin' ? '' : 'selected'}>員工</option><option value="admin" ${P.r === 'admin' ? 'selected' : ''}>主管</option></select></td>
+            <td class="pinc"><span class="pill ${P.h ? 'ok' : 'miss'}">${P.h ? '已設定' : '未設定'}</span><button class="btn mini" data-act="setpin">${P.h ? '重設' : '設定'}</button>${P.h ? '<button class="btn mini danger" data-act="clrpin">清除</button>' : ''}</td></tr>`; }).join('')}
+        </tbody></table></div>` : '<p class="muted pad">請先在上方「記錄人名單」輸入員工姓名。</p>'}
+        <div class="teamopts pad">
+          <label class="chk big"><input type="checkbox" id="teamon" ${T.on ? 'checked' : ''}> 啟用 PIN 碼登入與權限分級</label>
+          <label class="idle">閒置自動登出 <select id="teamidle">${IDLE_OPTS.map((m) => `<option value="${m}" ${T.idle === m ? 'selected' : ''}>${m ? m + ' 分鐘' : '不自動登出'}</option>`).join('')}</select></label>
+        </div>
+        ${T.on && !teamOn() ? '<p class="pad xv">⚠ 已勾選啟用，但還沒有設好 PIN 碼的主管，所以目前不會生效。</p>' : T.on ? `<p class="pad dl up">● 已啟用${db.meOk ? `・目前登入：${esc(db.meOk)}` : ''}</p>` : ''}
+        <p class="muted pad small">PIN 碼只存加密後的雜湊值，會同步到其他裝置。這是防止代簽的現場管理功能，不是資訊安全防護。</p>
+      </section>`;
+  }
   function viewSettings(el) {
     const c = db.cloud || {};
     const on = Cloud.on();
     const list = liveFridges();
     const slots = liveSlots();
     const nDays = Object.keys(db.recs).filter((d) => Object.values(db.recs[d]).some((ss) => Object.values(ss).some(hasT))).length;
+    // 啟用權限分級後，設定只有主管能進
+    if (!isAdmin()) {
+      el.innerHTML = `<div class="page-head"><h2>設定</h2></div>
+        <section class="card lockcard"><div class="lockic">🔒</div><h3>設定需要主管權限</h3>
+          <p class="muted">${loggedIn() ? `目前登入：${esc(db.me)}（員工）。` : '目前沒有人登入。'}請主管登入後，再修改設備、時段、名單與雲端設定。</p>
+          <button class="btn primary" data-act="adminlogin">🔑 主管登入</button></section>
+        <p class="muted center">冰箱溫度記錄表系統 v${VERSION}${DESK ? '（桌面版）' : ''}</p>`;
+      el.onclick = (e) => { if (e.target.closest('[data-act=adminlogin]')) loginDialog({ adminOnly: true }); };
+      return;
+    }
     el.innerHTML = `
       <div class="page-head"><h2>設定</h2></div>
       <section class="card form">
         <label>店名（顯示在標題、記錄表與匯出檔名）<input id="shopname" value="${esc(db.shop)}" placeholder="例如：碧潭餐廳"></label>
       </section>
       <section class="card">
-        <div class="card-head"><h3>冰箱設備</h3><div class="sp"></div><button class="btn primary" data-act="addf">＋ 新增設備</button></div>
+        <div class="card-head"><h3>冰箱設備</h3><div class="sp"></div><button class="btn" data-act="qrlabels" ${list.length ? '' : 'disabled'}>🏷 列印 QR Code 標籤</button><button class="btn primary" data-act="addf">＋ 新增設備</button></div>
         <p class="hint pad">選類型會帶入標準範圍（冷藏 0～7°C、冷凍 -25～-18°C、熱藏 60°C 以上；上限依法規，下限為防止結凍或溫控異常的建議值），也可以自己改上下限；空白表示不限。暫時不用的設備勾「停用」。<br>「區域」填一樣的設備（例如 車前、車後）會在每日記錄分組顯示，月報表每個區域印成一張。</p>
         <datalist id="arealist">${[...new Set(['車前', '車後', ...list.map((f) => f.area).filter(Boolean)])].map((a) => `<option value="${esc(a)}">`).join('')}</datalist>
         ${list.length ? `<div class="tbl-wrap"><table class="ftable"><thead><tr><th class="mv">排序</th><th>名稱</th><th>區域</th><th>類型</th><th class="r">下限 °C</th><th class="r">上限 °C</th><th class="c">停用</th><th></th></tr></thead><tbody>
@@ -1202,6 +1508,7 @@
           <div class="pad"><textarea id="staff" rows="5" placeholder="王小明&#10;李小華">${esc(db.staff.join('\n'))}</textarea></div>
         </section>
       </div>
+      ${teamCard()}
       <section class="card">
         <div class="card-head"><h3>☁ Google 雲端同步</h3></div>
         ${on ? `
@@ -1283,7 +1590,23 @@
       if (t.dataset.f === 'name' && !t.value.trim()) { t.classList.add('warn'); toast('設備名稱不能空白'); }
       if (t.id === 'staff') {
         db.staff = [...new Set(t.value.split(/[\n,，、]/).map((s) => s.trim()).filter(Boolean))];
-        db.staffAt = now(); save(); toast('已儲存記錄人名單');
+        db.staffAt = now(); save(); toast('已儲存記錄人名單'); viewSettings(el);
+        return;
+      }
+      if (t.id === 'teamon') {
+        if (t.checked && !db.staff.some(isAdminName)) { t.checked = false; toast('請先把至少一位設為「主管」並設定 PIN 碼', 4500); return; }
+        db.team.on = t.checked; setTeam();
+        if (t.checked && !isAdmin()) { viewSettings(el); toast('已啟用，請主管用 PIN 碼登入'); loginDialog({ adminOnly: true }); return; }
+        toast(t.checked ? '已啟用 PIN 碼登入與權限分級' : '已關閉 PIN 碼登入'); viewSettings(el);
+        return;
+      }
+      if (t.id === 'teamidle') { db.team.idle = +t.value; setTeam(); toast(+t.value ? `閒置 ${t.value} 分鐘會自動登出` : '不會自動登出'); return; }
+      if (t.dataset.role != null && t.closest('tr[data-n]')) {
+        const n = t.closest('tr').dataset.n;
+        db.team.people[n] = { ...person(n), r: t.value };
+        setTeam();
+        if (db.team.on && !db.staff.some(isAdminName)) toast('⚠ 目前沒有設好 PIN 碼的主管，PIN 碼登入暫時不會生效', 5000);
+        viewSettings(el);
         return;
       }
       if (t.id !== 'restore' || !t.files[0]) return;
@@ -1295,10 +1618,10 @@
           const tt = now();
           d.fridges.forEach((x) => { x.at = tt; });
           for (const v of Object.values(d.recs)) for (const ss of Object.values(v)) for (const r of Object.values(ss)) r.at = tt;
-          d.slotsAt = tt; d.staffAt = tt; if (d.shop) d.shopAt = tt;
+          d.slotsAt = tt; d.staffAt = tt; d.teamAt = tt; if (d.shop) d.shopAt = tt;
           d.cloud = db.cloud;
         } else delete d.cloud;
-        d.me = db.me;
+        d.me = db.me; d.meOk = db.meOk;
         db = d; await flush(); renderShop(); viewSettings(el); toast('已還原備份');
         Cloud.schedule(200);
       } catch (err) { alert('無法讀取備份：' + err.message); } finally { t.value = ''; }
@@ -1306,6 +1629,19 @@
     el.onclick = async (e) => {
       const b = e.target.closest('[data-act]'); if (!b) return;
       const a = b.dataset.act;
+      if (a === 'setpin' || a === 'clrpin') {
+        const n = b.closest('tr').dataset.n;
+        if (a === 'clrpin') {
+          if (!confirm(`清除「${n}」的 PIN 碼？\n清除後在重新設定之前，他不能登入記錄。`)) return;
+          db.team.people[n] = { ...person(n), h: '' }; setTeam(); toast(`已清除 ${n} 的 PIN 碼`);
+        } else {
+          try { if (!(await setPinDialog(n))) return; } catch (err) { alert(err.message); return; }
+          toast(`已設定 ${n} 的 PIN 碼`);
+        }
+        viewSettings(el);
+        return;
+      }
+      if (a === 'qrlabels') { location.hash = '#/qr'; return; }
       if (a === 'addf') {
         const last = list[list.length - 1];
         const type = last ? last.type : 'chill';
@@ -1365,7 +1701,7 @@
         db.cloud.on = false; db.cloud.pw = '';
         await flush(); Cloud.start(); viewSettings(el); toast('已中斷雲端連線');
       } else if (a === 'backup') {
-        const copy = { ...db }; delete copy.cloud; delete copy.me;
+        const copy = { ...db }; delete copy.cloud; delete copy.me; delete copy.meOk; delete copy.meAct;
         await saveFile(JSON.stringify(copy, null, 1), fname(`${db.shop ? db.shop + '_' : ''}冰箱溫度備份_${today().replace(/-/g, '')}.json`), 'application/json');
       } else if (a === 'demo') {
         if (Cloud.on()) return toast('連線雲端時不能產生示範資料');
@@ -1449,6 +1785,11 @@
       db = seed();
     }
     if (!db) { db = seed(); await flush(); }
+    // 關掉 App 超過閒置時間再打開，也要重新登入
+    lastAct = db.meAct || Date.now();
+    const idleOut = !!(teamOn() && db.team.idle && db.meOk && Date.now() - lastAct > db.team.idle * 60000);
+    if (idleOut) { db.me = ''; db.meOk = ''; }
+    lastAct = Date.now();
     addLowerBounds();
     const sw = db.fridges.filter((f) => !f.deleted && fixSwapped(f)).length;
     if (sw) { save(); setTimeout(() => toast(`有 ${sw} 台設備的下限、上限填反了，已自動對調`, 5000), 900); }
@@ -1456,6 +1797,7 @@
     renderShop();
     route();
     hideSplash();
+    if (idleOut) setTimeout(() => toast('超過閒置時間，請重新登入'), 1700);
     setStatus('');
     Cloud.start();
     if (!DESK && 'serviceWorker' in navigator && location.protocol.startsWith('http')) {

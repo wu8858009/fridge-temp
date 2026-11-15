@@ -31,7 +31,8 @@ const TABLES = {
   },
 };
 const ORDER = ['fridges', 'recs'];
-const CONF_KEYS = ['shop', 'slots', 'staff'];
+// team：員工 PIN 碼（只存雜湊）與權限（主管／員工）
+const CONF_KEYS = ['shop', 'slots', 'staff', 'team'];
 const TYPE_N = { chill: '冷藏', freeze: '冷凍', hot: '熱藏', other: '其他' };
 const TYPE_K = { 冷藏: 'chill', 冷凍: 'freeze', 熱藏: 'hot', 其他: 'other' };
 
@@ -94,6 +95,13 @@ function conf_() {
   CONF_KEYS.forEach((k) => { try { out[k] = JSON.parse(p.getProperty('CONF_' + k) || 'null'); } catch (e) { out[k] = null; } });
   return out;
 }
+function teamText_(conf) {
+  const t = conf.team && conf.team.v;
+  if (!t || typeof t !== 'object') return '未啟用';
+  const people = t.people && typeof t.people === 'object' ? t.people : {};
+  const admins = Object.keys(people).filter((n) => people[n] && people[n].r === 'admin');
+  return (t.on ? '已啟用' : '未啟用') + (admins.length ? '・主管：' + admins.join('、') : '') + (t.on && t.idle ? '・閒置 ' + t.idle + ' 分鐘自動登出' : '');
+}
 function writeConfSheet_(conf) {
   const ss = SpreadsheetApp.getActive();
   let sh = ss.getSheetByName('設定');
@@ -102,6 +110,7 @@ function writeConfSheet_(conf) {
   const rows = [['項目', '內容'], ['店名', conf.shop ? str_(conf.shop.v) : ''],
     ['記錄時段', slots.map((s) => s.name + (s.time ? ' ' + s.time : '')).join('、')],
     ['記錄人', conf.staff && Array.isArray(conf.staff.v) ? conf.staff.v.join('、') : ''],
+    ['PIN 碼登入', teamText_(conf)],
     ['說明', '這個分頁只供查看，請在 App 的「設定」修改。']];
   const last = sh.getLastRow();
   if (last > 0) sh.getRange(1, 1, last, 2).clearContent();
